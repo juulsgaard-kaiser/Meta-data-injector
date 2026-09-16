@@ -52,7 +52,7 @@ class ExifToolBridge(ContainerHandler):
 
     @property
     def supported_containers(self) -> list[ContainerFormat]:
-        return [ContainerFormat.MP4, ContainerFormat.MOV, ContainerFormat.WAV, ContainerFormat.AIFF]
+        return [ContainerFormat.MP4, ContainerFormat.MOV]
 
     @property
     def supported_schemas(self) -> list[MetadataSchema]:
@@ -74,6 +74,8 @@ class ExifToolBridge(ContainerHandler):
             cmd,
             capture_output=True,
             text=True,
+            encoding="utf-8-sig",
+            errors="replace",
             timeout=timeout,
             creationflags=creation_flags,
         )

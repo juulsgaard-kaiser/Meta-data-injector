@@ -47,6 +47,8 @@ class MXFHandler(ContainerHandler):
             cmd,
             capture_output=True,
             text=True,
+            encoding="utf-8-sig",
+            errors="replace",
             timeout=timeout,
             creationflags=creation_flags,
         )

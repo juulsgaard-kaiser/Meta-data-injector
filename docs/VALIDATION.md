@@ -41,6 +41,8 @@ interaction still needs manual acceptance testing.
 ## Limits that remain explicit
 
 - MXF is inspection-only; RF64 cannot be written. No automatic re-wrap is offered.
+- ExifTool writes are restricted to MP4/MOV. WAV/BWF and AIFF use their native
+  writers for the documented schemas; ExifTool remains available for inspection.
 - Deep inspection relies on what ExifTool can extract. Main-document tags can be
   submitted to supported writers; duplicate/embedded values are inspection-only.
 - Reading an unknown tag does not make it writable. Structured editing requires

@@ -21,13 +21,15 @@ def exiftool(isolated_config):
 def test_exiftool_list_write_and_deep_read(media, exiftool):
     path = media("mp4")
     before = packet_fingerprint(path)
-    payload = MetadataPayload.from_dict({"exiftool": {"XMP-dc:Title": "A & B", "XMP-dc:Subject": ["one", "two"]}})
+    payload = MetadataPayload.from_dict(
+        {"exiftool": {"XMP-dc:Title": "Café & 日本語", "XMP-dc:Subject": ["one", "two"]}}
+    )
     result = InjectionEngine().inject_single(path, payload)
     assert result.status == InjectionStatus.SUCCESS, result.message
     assert result.fields_written == 2
     assert packet_fingerprint(path) == before
     tags = exiftool.inspect_all(path)["tags"][0]
-    assert tags["XMP-dc:Main:Title"] == "A & B"
+    assert tags["XMP-dc:Main:Title"] == "Café & 日本語"
     assert tags["XMP-dc:Main:Subject"] == ["one", "two"]
     assert any("ChunkOffset" in key for key in tags)
 
@@ -52,7 +54,7 @@ def test_mkv_tags_preserve_existing_tags(media, isolated_config):
     path = media("mkv")
     before = packet_fingerprint(path)
     engine = InjectionEngine()
-    for fields in ({"ARTIST": "Original artist"}, {"title": "Title", "DESCRIPTION": "Rock & Roll"}):
+    for fields in ({"ARTIST": "Original æøå artist"}, {"title": "Title", "DESCRIPTION": "Rock & Roll"}):
         payload = MetadataPayload.from_dict({"matroska_tags": fields})
         result = engine.inject_single(path, payload)
         assert result.status == InjectionStatus.SUCCESS, result.message
@@ -60,6 +62,24 @@ def test_mkv_tags_preserve_existing_tags(media, isolated_config):
 
     root = MatroskaHandler()._read_tags(path)
     values = {node.findtext("Name"): node.findtext("String") for node in root.findall(".//Simple")}
-    assert values["ARTIST"] == "Original artist"
+    assert values["ARTIST"] == "Original æøå artist"
     assert values["DESCRIPTION"] == "Rock & Roll"
     assert packet_fingerprint(path) == before
+
+
+@pytest.mark.parametrize("extension", ["wav", "aiff"])
+def test_audio_inventory_is_read_only_for_exiftool_route(media, exiftool, extension):
+    from fastapi.testclient import TestClient
+
+    from apex_injector.gui.server import create_app
+
+    path = media(extension)
+    engine = InjectionEngine()
+    original = path.read_bytes()
+    result = engine.inject_single(path, MetadataPayload.from_dict({"exiftool": {"XMP-dc:Title": "Title"}}))
+    assert result.status == InjectionStatus.UNSUPPORTED_FIELD
+    assert path.read_bytes() == original
+    with TestClient(create_app()) as client:
+        response = client.post("/api/inspect", json={"file": str(path)}).json()
+    assert response["inventory"]
+    assert all(row["risk"]["level"] == "read_only" for row in response["inventory"])

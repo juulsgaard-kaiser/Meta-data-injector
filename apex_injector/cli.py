@@ -18,6 +18,12 @@ from apex_injector import __app_name__, __version__
 
 def cli_main(argv: list[str] | None = None):
     """Main CLI entry point."""
+    # Windows redirected output otherwise uses a legacy code page, which cannot
+    # represent metadata values or the CLI's status symbols.
+    if sys.platform == "win32":
+        for stream in (sys.stdout, sys.stderr):
+            if hasattr(stream, "reconfigure"):
+                stream.reconfigure(encoding="utf-8")
     parser = argparse.ArgumentParser(
         prog="apex-injector",
         description=f"{__app_name__} v{__version__} — High-speed batch metadata injection",

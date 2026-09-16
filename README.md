@@ -9,8 +9,8 @@ production camera formats and editing applications still need workflow-specific 
 | Container | Implemented writes | Requirements / limits |
 |---|---|---|
 | MP4 / MOV | Native XMP; additional ExifTool-supported tags | Native writes preserve sample offsets. Additional tags require ExifTool + FFprobe. |
-| WAV / BWF | BEXT, simple iXML fields, XMP, ID3 text | RIFF only; RF64 writing is rejected. Additional ExifTool tags require FFprobe. |
-| AIFF / AIFF-C | ID3 text | Additional ExifTool tags require FFprobe. |
+| WAV / BWF | BEXT, simple iXML fields, XMP, ID3 text | RIFF only; RF64 writing is rejected. ExifTool provides inspection only. |
+| AIFF / AIFF-C | ID3 text | ExifTool provides inspection only. |
 | MKV / MKA / WebM | Matroska title, date and global text tags | MKVToolNix (`mkvpropedit`, `mkvextract`, `mkvmerge`) + FFprobe. Existing unrelated tags are retained. |
 | MXF | Read-only inspection | ExifTool for metadata. No MXF writing or re-wrapping. |
 
