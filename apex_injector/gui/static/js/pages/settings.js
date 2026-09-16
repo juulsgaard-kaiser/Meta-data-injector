@@ -26,7 +26,7 @@ Pages.settings = {
         <div class="card">
             <div class="card-header"><h3 class="card-title">About</h3></div>
             <div style="padding:8px 0">
-                <p style="font-size:0.9rem;margin-bottom:6px"><strong>Apex Meta-Injector</strong> v1.0.0</p>
+                <p style="font-size:0.9rem;margin-bottom:6px"><strong>Apex Meta-Injector</strong> v0.0.2 alpha</p>
                 <p class="text-sm text-tertiary">High-speed batch metadata injection for professional and consumer media containers. Header-only manipulation — no bitstream re-encoding.</p>
                 <p class="text-xs text-tertiary mt-md">Windows 10/11 x64 • Python 3.11+ • Edge WebView2</p>
             </div>
@@ -51,7 +51,7 @@ Pages.settings = {
                             <span class="compat-dot ${available ? 'compat-green' : 'compat-red'}"></span>
                             ${name}
                         </div>
-                        <div class="settings-desc">${info.path || 'Not found on PATH'}</div>
+                        <input class="input tool-path" data-tool="${escapeHtml(name)}" value="${escapeHtml(info.path || '')}" placeholder="Full executable path">
                     </div>
                     ${info.url ? `<a href="${info.url}" target="_blank" class="btn btn-sm btn-ghost">Download</a>` : ''}
                 </div>`;
@@ -64,7 +64,7 @@ Pages.settings = {
                 <div class="settings-row">
                     <div><div class="settings-label">Thread Pool Workers</div><div class="settings-desc">Current: ${config.engine.max_workers_effective} workers (0 = auto-detect)</div></div>
                     <div style="display:flex;align-items:center;gap:10px">
-                        <input type="range" class="range-slider" min="0" max="128" value="${config.engine.max_workers}" id="settings-workers" oninput="document.getElementById('workers-val').textContent=this.value||'auto'">
+                        <input type="range" class="range-slider" min="0" max="64" value="${config.engine.max_workers}" id="settings-workers" oninput="document.getElementById('workers-val').textContent=this.value||'auto'">
                         <span class="font-mono text-sm" id="workers-val" style="width:35px;text-align:right">${config.engine.max_workers || 'auto'}</span>
                     </div>
                 </div>
@@ -97,16 +97,23 @@ Pages.settings = {
 
     async saveConfig() {
         try {
+            const tools = {};
+            document.querySelectorAll('.tool-path').forEach(input => { tools[input.dataset.tool] = input.value.trim(); });
             const update = {
+                tools,
                 engine: {
                     max_workers: parseInt(document.getElementById('settings-workers').value) || 0,
                     create_backups: document.getElementById('settings-backups').checked,
                     verify_bitstream: document.getElementById('settings-verify').checked,
                     hash_algorithm: document.getElementById('settings-hash').value,
-                    file_in_use_retries: parseInt(document.getElementById('settings-retries').value) || 3,
+                    file_in_use_retries: Number(document.getElementById('settings-retries').value),
                 }
             };
-            await App.api('/config', { method: 'PUT', body: update });
+            const warnings = [];
+            if (!update.engine.create_backups) warnings.push('Disabling backups removes the automatic recovery copy.');
+            if (!update.engine.verify_bitstream) warnings.push('Disabling bitstream checks may allow media changes to go undetected.');
+            if (!await confirmEditRisk({fields:[], protection_warnings:warnings})) return;
+            await App.api('/config' , { method: 'PUT', body: update });
             Toast.show('Settings saved', 'success');
         } catch (e) {
             Toast.show(`Save failed: ${e.message}`, 'error');

@@ -8,7 +8,6 @@ metadata (ANNO, NAME, AUTH chunks).
 
 from __future__ import annotations
 
-import io
 import logging
 import shutil
 import struct
@@ -61,7 +60,7 @@ class AIFFHandler(ContainerHandler):
 
     @property
     def supported_schemas(self) -> list[MetadataSchema]:
-        return [MetadataSchema.ID3V24, MetadataSchema.XMP]
+        return [MetadataSchema.ID3V24]
 
     def analyze(self, file_path: Path) -> FileAnalysis:
         """Analyze an AIFF file."""
@@ -110,9 +109,9 @@ class AIFFHandler(ContainerHandler):
 
         # Read ID3v2 tags via mutagen
         try:
-            from mutagen.aiff import AIFF as MutagenAIFF
+            from mutagen.aiff import AIFF
 
-            audio = MutagenAIFF(str(file_path))
+            audio = AIFF(str(file_path))
             if audio.tags:
                 id3_data = {}
                 for key, value in audio.tags.items():
@@ -142,8 +141,14 @@ class AIFFHandler(ContainerHandler):
         manipulation for native AIFF metadata.
         """
         import time
+
         start = time.perf_counter()
         result = InjectionResult(file_path=file_path, status=InjectionStatus.FAILED)
+
+        if not payload.fields or any(f.schema not in self.supported_schemas for f in payload.fields):
+            result.message = "AIFF supports ID3 metadata only"
+            result.fields_failed = len(payload.fields)
+            return result
 
         # Copy to staging first
         shutil.copy2(str(file_path), str(staging_path))
@@ -165,14 +170,18 @@ class AIFFHandler(ContainerHandler):
             result.fields_written = fields_written
             result.fields_failed = fields_failed
             result.status = (
-                InjectionStatus.SUCCESS if fields_failed == 0
-                else InjectionStatus.PARTIAL if fields_written > 0
+                InjectionStatus.SUCCESS
+                if fields_failed == 0
+                else InjectionStatus.PARTIAL
+                if fields_written > 0
                 else InjectionStatus.FAILED
             )
             result.duration_ms = (time.perf_counter() - start) * 1000
 
         except Exception as e:
             result.status = InjectionStatus.FAILED
+            result.fields_written = 0
+            result.fields_failed = len(payload.fields)
             result.message = str(e)
             logger.error("AIFF injection failed: %s", e)
 
@@ -234,68 +243,55 @@ class AIFFHandler(ContainerHandler):
 
         return metadata
 
-    def _inject_id3(self, file_path: Path, fields: list) -> tuple[int, int]:
-        """Inject ID3v2.4 tags using mutagen."""
-        written = 0
-        failed = 0
+    def _inject_id3(self, file_path, fields):
+        from mutagen.aiff import AIFF
 
-        try:
-            from mutagen.aiff import AIFF as MutagenAIFF
-            from mutagen.id3 import (
-                TIT2, TPE1, TALB, TDRC, COMM, TCON, TXXX, TCOP, TEXT,
-            )
+        from apex_injector.handlers.id3_metadata import update_tags, verify_tags
 
-            audio = MutagenAIFF(str(file_path))
+        audio = AIFF(file_path)
+        if audio.tags is None:
+            audio.add_tags()
+        update_tags(audio.tags, fields)
+        audio.save()
+        verify_tags(AIFF(file_path).tags, fields)
+        return len(fields), 0
 
-            if audio.tags is None:
-                audio.add_tags()
+    def validate(self, path):
+        from mutagen.aiff import AIFF
 
-            # Mapping from common keys to ID3 frames
-            frame_map = {
-                "title": lambda v: TIT2(encoding=3, text=[v]),
-                "Title": lambda v: TIT2(encoding=3, text=[v]),
-                "dc:Title": lambda v: TIT2(encoding=3, text=[v]),
-                "artist": lambda v: TPE1(encoding=3, text=[v]),
-                "Artist": lambda v: TPE1(encoding=3, text=[v]),
-                "dc:Creator": lambda v: TPE1(encoding=3, text=[v]),
-                "album": lambda v: TALB(encoding=3, text=[v]),
-                "Album": lambda v: TALB(encoding=3, text=[v]),
-                "date": lambda v: TDRC(encoding=3, text=[v]),
-                "Date": lambda v: TDRC(encoding=3, text=[v]),
-                "genre": lambda v: TCON(encoding=3, text=[v]),
-                "Genre": lambda v: TCON(encoding=3, text=[v]),
-                "copyright": lambda v: TCOP(encoding=3, text=[v]),
-                "Copyright": lambda v: TCOP(encoding=3, text=[v]),
-            }
+        AIFF(path)
+        self.get_essence_regions(path)
 
-            for field in fields:
-                key = field.key
-                value = str(field.value)
+    def get_essence_regions(self, path):
+        regions = []
+        size = path.stat().st_size
+        with open(path, "rb") as f:
+            header = f.read(12)
+            if len(header) != 12 or header[:4] != b"FORM" or header[8:] not in (b"AIFF", b"AIFC"):
+                raise ValueError("Invalid AIFF header")
+            if int.from_bytes(header[4:8], "big") + 8 != size:
+                raise ValueError("AIFF size mismatch")
+            offset = 12
+            while offset < size:
+                f.seek(offset)
+                chunk = f.read(8)
+                if len(chunk) != 8:
+                    raise ValueError("Truncated AIFF chunk")
+                length = int.from_bytes(chunk[4:], "big")
+                end = offset + 8 + length + length % 2
+                if end > size:
+                    raise ValueError("AIFF chunk exceeds file length")
+                if chunk[:4] in (b"SSND", b"COMM"):
+                    regions.append((offset + 8, length))
+                offset = end
+        if len(regions) < 2:
+            raise ValueError("AIFF requires sound and format chunks")
+        return regions
 
-                frame_factory = frame_map.get(key)
-                if frame_factory:
-                    frame = frame_factory(value)
-                    audio.tags.add(frame)
-                    written += 1
-                else:
-                    # Store as TXXX (user-defined text frame)
-                    audio.tags.add(TXXX(
-                        encoding=3,
-                        desc=key,
-                        text=[value],
-                    ))
-                    written += 1
+    def essence_fingerprint(self, path):
+        from apex_injector.win32_io import hash_regions
 
-            audio.save()
-
-        except ImportError:
-            logger.error("mutagen not installed for AIFF ID3 injection")
-            failed = len(fields)
-        except Exception as e:
-            logger.error("ID3 injection failed: %s", e)
-            failed = len(fields) - written
-
-        return written, failed
+        return hash_regions(path, self.get_essence_regions(path))
 
 
 # Auto-register

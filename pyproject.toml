@@ -1,24 +1,23 @@
 [build-system]
-requires = ["setuptools>=68.0", "wheel"]
+requires = ["setuptools>=77.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "apex-meta-injector"
-version = "0.0.1"
-description = "High-speed batch metadata injection for professional and consumer media containers. Header-only manipulation — no re-encoding."
+version = "0.0.2"
+description = "Inspect and edit media metadata with staged writes, edit-risk previews and integrity verification."
 readme = "README.md"
 requires-python = ">=3.11"
-license = {text = "MIT"}
+license = "MIT"
 authors = [
     {name = "Apex Meta-Injector Team"}
 ]
 keywords = ["metadata", "video", "audio", "ProRes", "DNxHD", "MXF", "MP4", "MOV", "XMP", "IPTC", "EXIF"]
 classifiers = [
-    "Development Status :: 4 - Beta",
+    "Development Status :: 3 - Alpha",
     "Environment :: Win32 (MS Windows)",
     "Intended Audience :: End Users/Desktop",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
     "Operating System :: Microsoft :: Windows :: Windows 10",
     "Operating System :: Microsoft :: Windows :: Windows 11",
     "Programming Language :: Python :: 3.11",
@@ -28,16 +27,12 @@ classifiers = [
 ]
 
 dependencies = [
-    "construct==2.8.8",
-    "pymp4>=1.4.0",
     "mutagen>=1.47.0",
-    "PyExifTool>=0.5.6",
     "xxhash>=3.4.0",
     "fastapi>=0.110.0",
     "uvicorn[standard]>=0.27.0",
     "websockets>=12.0",
-    "pywebview>=5.0",
-    "aiofiles>=23.2.0",
+    "pywebview>=5.0; sys_platform == 'win32'",
     "pydantic>=2.6.0",
 ]
 
@@ -47,7 +42,9 @@ dev = [
     "pytest-asyncio>=0.23.0",
     "httpx>=0.27.0",
     "ruff>=0.3.0",
+    "build>=1.2.0",
 ]
+ui-test = ["playwright>=1.50"]
 build = [
     "pyinstaller>=6.4.0",
 ]
@@ -63,7 +60,6 @@ include = ["apex_injector*"]
 
 [tool.setuptools.package-data]
 apex_injector = [
-    "codec_manifest.json",
     "gui/static/**/*",
 ]
 
@@ -77,3 +73,4 @@ select = ["E", "F", "W", "I", "N", "UP"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+pythonpath = ["."]

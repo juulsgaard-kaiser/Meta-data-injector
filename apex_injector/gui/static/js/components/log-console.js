@@ -13,7 +13,7 @@ const LogConsole = {
         if (body) {
             const line = document.createElement('div');
             line.className = 'log-line';
-            line.innerHTML = `<span class="log-time">${time}</span><span class="log-msg ${type}">${message}</span>`;
+            line.innerHTML = `<span class="log-time">${time}</span><span class="log-msg ${type}">${escapeHtml(message)}</span>`;
             body.appendChild(line);
             body.scrollTop = body.scrollHeight;
         }
@@ -26,7 +26,7 @@ const LogConsole = {
     renderExisting(containerId = 'log-body') {
         const body = document.getElementById(containerId);
         if (!body) return;
-        body.innerHTML = this.lines.map(l => `<div class="log-line"><span class="log-time">${l.time}</span><span class="log-msg ${l.type}">${l.message}</span></div>`).join('');
+        body.innerHTML = this.lines.map(l => `<div class="log-line"><span class="log-time">${l.time}</span><span class="log-msg ${l.type}">${escapeHtml(l.message)}</span></div>`).join('');
         body.scrollTop = body.scrollHeight;
     }
 };

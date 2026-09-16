@@ -1,6 +1,14 @@
 /** Metadata Editor — Tabbed form for XMP/IPTC/EXIF/ID3 editing */
 const MetadataEditor = {
     schemas: [
+        { id: 'id3v2.4', label: 'ID3 (AIFF/WAV)', fields: [
+            {key:'Title', label:'Title', type:'text'}, {key:'Artist', label:'Artist', type:'text'},
+            {key:'Album', label:'Album', type:'text'}, {key:'Comment', label:'Comment', type:'textarea'}
+        ]},
+        { id: 'matroska_tags', label: 'Matroska', fields: [
+            {key:'title', label:'Title', type:'text'}, {key:'ARTIST', label:'Artist', type:'text'},
+            {key:'DESCRIPTION', label:'Description', type:'textarea'}
+        ]},
         { id: 'xmp', label: 'XMP', fields: [
             { key: 'dc:Title', label: 'Title', type: 'text' },
             { key: 'dc:Creator', label: 'Creator', type: 'text' },
@@ -49,7 +57,7 @@ const MetadataEditor = {
             html += '<div class="metadata-form">';
             const schemaData = existingMetadata[s.id] || {};
             s.fields.forEach(f => {
-                const value = schemaData[f.key] || '';
+                const value = escapeHtml(schemaData[f.key] || '');
                 const fullWidth = f.fullWidth ? ' full-width' : '';
                 html += `<div class="input-group${fullWidth}">`;
                 html += `<label class="input-label">${f.label}</label>`;

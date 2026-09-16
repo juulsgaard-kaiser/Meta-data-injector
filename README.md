@@ -1,95 +1,110 @@
 # Apex Meta-Injector
 
-> **High-speed batch metadata injection for professional and consumer media containers.**
-> Header-only / atom-only manipulation — no bitstream re-encoding. Ever.
+Inspect and edit media metadata through a Windows desktop app or a scriptable CLI.
+**Version 0.0.2 is alpha software.** It uses staged writes, backups and integrity checks;
+production camera formats and editing applications still need workflow-specific validation.
 
-[![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-blue.svg)](https://python.org)
-[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-[![Platform: Windows](https://img.shields.io/badge/Platform-Windows%2010%2F11-0078D6.svg)](https://www.microsoft.com/windows)
+## Current capabilities
 
----
+| Container | Implemented writes | Requirements / limits |
+|---|---|---|
+| MP4 / MOV | Native XMP; additional ExifTool-supported tags | Native writes preserve sample offsets. Additional tags require ExifTool + FFprobe. |
+| WAV / BWF | BEXT, simple iXML fields, XMP, ID3 text | RIFF only; RF64 writing is rejected. Additional ExifTool tags require FFprobe. |
+| AIFF / AIFF-C | ID3 text | Additional ExifTool tags require FFprobe. |
+| MKV / MKA / WebM | Matroska title, date and global text tags | MKVToolNix (`mkvpropedit`, `mkvextract`, `mkvmerge`) + FFprobe. Existing unrelated tags are retained. |
+| MXF | Read-only inspection | ExifTool for metadata. No MXF writing or re-wrapping. |
 
-## What It Does
+Support is determined by the **container and requested tags**, not simply by a codec name.
+The codec catalog is an identification reference, not a certification of every ProRes,
+DNx, XAVC or other variant. Unsupported fields fail the whole file operation instead
+of being silently skipped. Mixed schemas must be supported by one writer.
 
-Apex Meta-Injector writes metadata into media file headers **without touching the bitstream**. It performs atomic, Stage-Verify-Commit transactions using Win32 API calls (`ReplaceFileW`, `LockFileEx`) so your media essence is never at risk.
+### Deep inspection and edit risks
 
-### Supported Formats
+The **Inspect & Edit Metadata** page can use ExifTool to list embedded, duplicate,
+unknown and structured tags with group/document identifiers. Filter the inventory and
+add supported main-document tags to advanced edits. Embedded/duplicate tags and
+unsupported containers are shown as read-only.
 
-| Category | Codecs / Containers |
-|----------|-------------------|
-| **Professional Mezzanine** | Apple ProRes (all profiles incl. 4444 XQ), Avid DNxHR/DNxHD, Sony XAVC, Panasonic AVC-Intra |
-| **Consumer / Web** | H.264/AVC, H.265/HEVC, AV1, VP9, MPEG-D USAC |
-| **Containers** | MOV, MP4, MXF (OP-1a, OP-Atom), MKV, BWF (Broadcast Wave), AIFF |
-| **Metadata Schemas** | XMP, IPTC, EXIF, ID3v2.4, Vorbis Comments, SMPTE ST 377 (MXF) |
+Reading a tag does not imply it can be written. Proprietary or opaque metadata may
+remain unreadable or uneditable, and this app does not promise access to all metadata.
+ExifTool may reject a tag based on the specific file even when its group is supported.
 
-### Key Features
+Before writing, the app displays a risk description for each field. Technical or
+unfamiliar fields require explicit acknowledgement. Timing, dates and loudness have
+specific warnings; filesystem/computed fields are blocked. CLI users acknowledge
+higher-risk edits with `--accept-risk`. Acknowledgement never bypasses writer or
+integrity checks. Rotation editing remains deferred.
 
-- **Atomic transactions** — Stage → Verify bitstream → Commit via `ReplaceFileW`
-- **Thread-pooled batch processing** — auto-tuned worker count for NVMe throughput
-- **Complex Wrap safeguard** — MXF re-wrapping flagged for user approval
-- **File-in-use retry** — exponential backoff for locked files
-- **Bitstream integrity verification** — xxHash3-128 essence hashing
-- **Desktop GUI** — dark-themed native Windows app (pywebview + FastAPI)
-- **CLI mode** — scriptable batch injection from JSON/CSV manifests
+### What protects files
 
----
+1. Lock the source and serialize application transactions for its canonical path.
+2. Write to a temporary file in the same directory.
+3. Validate the container and compare media fingerprints before committing.
+4. Check that the source has not changed and create a unique backup by default.
+5. Replace the original using `ReplaceFileW` on Windows (`os.replace` on Linux).
+
+Failed writes, verification failures and backup failures do not report success.
+Earlier backups are retained. Cancellation finishes active file transactions and
+cancels queued files. Native MP4/WAV processing streams media instead of loading
+entire files into RAM.
+
+Native checks hash media regions and selected structural fields. External writers
+use FFprobe packet hashes, timing and codec parameters. These checks do not prove
+that every player or NLE will interpret all metadata identically. Keep backups and
+validate representative files in your actual workflow. Staging and backups require
+additional disk space; automatic workers are capped conservatively at four.
 
 ## Installation
 
-### Prerequisites
-
-- **Python 3.11+** on Windows 10/11
-- **ExifTool** — [exiftool.org](https://exiftool.org/) (rename to `exiftool.exe`, add to PATH)
-- **MKVToolNix** — [mkvtoolnix.download](https://mkvtoolnix.download/) (for MKV support)
-- **bmx tools** — [github.com/bbc/bmx](https://github.com/bbc/bmx) (for MXF support, optional)
-
-### From Source
+Python 3.11+ is required. The native desktop app targets Windows 10/11 with Edge
+WebView2. The CLI and browser-based development UI also run on Linux.
 
 ```bash
 git clone https://github.com/juulsgaard-kaiser/Meta-data-injector.git
 cd Meta-data-injector
 pip install -e .
-```
-
-### Verify External Tools
-
-```bash
 python setup_tools.py
 ```
 
----
+Install tools for the features you use, and configure their executable paths in
+**Settings** or place them on `PATH`:
+
+- [ExifTool](https://exiftool.org/) for deep inspection and additional writable tags.
+  Keep its supporting files with the Windows executable; name it `exiftool.exe`.
+- [FFprobe (FFmpeg)](https://ffmpeg.org/download.html) for external-writer integrity checks.
+- [MKVToolNix](https://mkvtoolnix.download/) for Matroska editing.
+
+Native XMP in MP4/MOV, RIFF metadata and AIFF ID3 do not require these executables.
+FFmpeg is used to generate test fixtures. The legacy bmx setting is unused; MXF
+writing is disabled.
 
 ## Usage
 
-### GUI Mode (Default)
-
 ```bash
+# Native desktop app
 python -m apex_injector
-# or
-apex-injector --gui
-```
 
-Launches a native Windows desktop application with:
-- **Dashboard** — system status, tool health, quick actions
-- **Inject** — drag-and-drop file selection + metadata editor
-- **Batch** — JSON/CSV manifest processing with live progress
-- **Scan** — directory analysis with CSV export
-- **Settings** — tool paths, thread pool, backup/verify toggles
-
-### CLI Mode
-
-```bash
-# Single file injection
-apex-injector inject video.mp4 --title "My Title" --artist "Author"
-
-# Batch from manifest
+# CLI subcommands route directly to the CLI
+apex-injector inject video.mp4 --title "My title" --artist "Author"
+apex-injector verify video.mp4 --deep
 apex-injector batch manifest.json
-
-# Directory scan
 apex-injector scan ./media --recursive --export results.csv
+
+# Advanced group-qualified tag (ExifTool + FFprobe required)
+apex-injector inject video.mov --meta "exiftool:QuickTime:CreateDate=2026:09:16 12:00:00" --accept-risk
 ```
 
-### Manifest Format (JSON)
+In the desktop app, **Browse files** supplies full paths. When running the UI in a
+browser, paste full file paths. **Preview risks** shows warnings before applying
+changes; results include any error and the backup location. Settings persist across
+restarts. Use `--help` on any CLI command for available options. `verify` displays
+metadata; it is not a comparison against an earlier original file.
+
+### JSON manifest
+
+Paths are relative to the manifest's directory unless absolute. Schema names are
+explicit and unknown schemas are rejected. Duplicate paths are rejected.
 
 ```json
 [
@@ -97,88 +112,53 @@ apex-injector scan ./media --recursive --export results.csv
     "file": "video.mp4",
     "metadata": {
       "xmp": {
-        "dc:Title": "My Title",
-        "dc:Creator": "Author Name"
-      },
-      "iptc": {
-        "Keywords": ["tag1", "tag2"]
+        "dc:Title": "My title",
+        "dc:Creator": ["Author"],
+        "dc:Subject": ["tag1", "tag2"]
       }
     }
   }
 ]
 ```
 
-### Manifest Format (CSV)
+### CSV manifest
 
 ```csv
-file,Title,Artist,Keywords
-video1.mp4,"My Title","Author","tag1;tag2"
-video2.mov,"Another","Author2","tag3"
+file,XMP:dc:Title,XMP:dc:Creator,XMP:dc:Subject
+video1.mp4,My title,Author,tag1;tag2
+video2.mov,Another title,Author,tag3
 ```
 
----
+Advanced JSON accepts `exiftool` with explicit groups, for example
+`{"exiftool":{"XMP-dc:Subject":["one","two"]}}`. Empty values and deletion are not
+uniformly supported by writers; do not use them as a general metadata-removal API.
 
-## Architecture
-
-```
-apex_injector/
-├── __main__.py          # Entry point (CLI/GUI routing)
-├── config.py            # Configuration system
-├── codec_manifest.py    # Codec ↔ container ↔ schema mapping
-├── engine.py            # Core injection engine
-├── manifest.py          # JSON/CSV manifest parser
-├── thread_pool.py       # Windows-optimized thread pool
-├── win32_io.py          # Win32 API (atomic replace, file locking)
-├── handlers/
-│   ├── __init__.py      # Handler base class + registry
-│   ├── isobmff_handler.py   # MP4/MOV (pymp4 + construct)
-│   ├── mxf_handler.py       # MXF (bmxtranswrap)
-│   ├── matroska_handler.py  # MKV (mkvpropedit)
-│   ├── bwf_handler.py       # BWF/WAV (RIFF chunk)
-│   ├── aiff_handler.py      # AIFF (mutagen)
-│   └── exiftool_bridge.py   # Universal fallback (ExifTool)
-└── gui/
-    ├── __init__.py      # pywebview launcher
-    ├── server.py        # FastAPI backend + WebSocket
-    └── static/          # Frontend SPA (HTML/CSS/JS)
-```
-
-### Transaction Workflow
-
-```
-1. STAGE   → Copy file to staging path (same volume)
-2. INJECT  → Write metadata into staging copy
-3. VERIFY  → xxHash3-128 the essence region (original vs staged)
-4. COMMIT  → ReplaceFileW (atomic swap with optional backup)
-5. FAIL?   → Rollback (delete staging file, original untouched)
-```
-
----
-
-## Building the Executable
+## Build and development
 
 ```bash
-pip install -e ".[build]"
+pip install -e ".[dev,build]"
+pytest -ra
+ruff check .
+ruff format --check .
+python -m build
 pyinstaller apex_injector.spec --noconfirm
 ```
 
-Output: `dist/ApexMetaInjector/ApexMetaInjector.exe`
+The Windows build produces `dist/ApexMetaInjector/ApexMetaInjector.exe` and
+`ApexMetaInjectorCLI.exe` in the same folder. External media tools are not bundled.
 
----
-
-## Development
+Integration tests require FFmpeg, FFprobe, ExifTool and MKVToolNix. Without them,
+tool-dependent tests are skipped. CI requires these tools and tests Linux and
+native Windows I/O, wheel installation, and Windows executable packaging.
+For the optional browser test:
 
 ```bash
-pip install -e ".[dev]"
-
-# Run audit
-python tests/audit.py
-
-# Run tests
-pytest
+pip install -e ".[dev,ui-test]"
+python -m playwright install chromium
+APEX_UI_TEST=1 pytest tests/test_gui.py  # Bash; set the environment variable in PowerShell on Windows
 ```
 
----
+See [validation notes](docs/VALIDATION.md) for audit coverage and remaining limits.
 
 ## License
 

@@ -113,10 +113,10 @@ const App = {
                 });
                 break;
             case 'complex_wrap_request':
-                Modal.showComplexWrap(data.file, data.info);
+                Toast.show('This container requires an unsupported rewrap operation', 'warning');
                 break;
             case 'batch_complete':
-                Toast.show(`Batch complete: ${data.succeeded} succeeded, ${data.failed} failed`, 'success');
+                Toast.show(`Batch ${data.status || 'complete'}: ${data.succeeded} succeeded, ${data.failed} failed`, data.failed ? 'warning' : 'success');
                 break;
         }
     },
@@ -153,7 +153,7 @@ const App = {
             const response = await fetch(url, config);
             if (!response.ok) {
                 const error = await response.json().catch(() => ({ detail: response.statusText }));
-                throw new Error(error.detail || `API error: ${response.status}`);
+                throw new Error(typeof error.detail === 'string' ? error.detail : JSON.stringify(error.detail || error));
             }
             return await response.json();
         } catch (e) {
@@ -188,7 +188,7 @@ const Toast = {
         const container = document.getElementById('toast-container');
         const toast = document.createElement('div');
         toast.className = `toast toast-${type}`;
-        toast.innerHTML = `<span>${message}</span>`;
+        toast.textContent = message;
         toast.onclick = () => toast.remove();
         container.appendChild(toast);
         setTimeout(() => {
@@ -216,6 +216,7 @@ function formatDuration(ms) {
 
 function getContainerBadge(container) {
     if (!container) return '<span class="container-badge">???</span>';
+    container = escapeHtml(container);
     const cls = `badge-${container.toLowerCase()}`;
     return `<span class="container-badge ${cls}">${container.toUpperCase()}</span>`;
 }
@@ -230,8 +231,38 @@ function getStatusPill(status) {
         'running': ['processing', '● Running'],
     };
     const [cls, label] = map[status] || ['queued', status];
-    return `<span class="status-pill status-${cls}"><span class="dot"></span>${label}</span>`;
+    return `<span class="status-pill status-${cls}"><span class="dot"></span>${escapeHtml(label)}</span>`;
 }
 
 // Pages registry
 const Pages = {};
+
+function escapeHtml(value) {
+    return String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;'}[c]));
+}
+
+async function confirmEditRisk(preview) {
+    const fields = preview.fields || [];
+    const blocked = fields.filter(f => f.level === 'read_only');
+    if (blocked.length) {
+        Toast.show(`Read-only fields: ${blocked.map(f => f.tag).join(', ')}`, 'error');
+        return false;
+    }
+    const higher = fields.filter(f => f.level === 'high');
+    const warnings = preview.protection_warnings || [];
+    if (!higher.length && !warnings.length) return true;
+    return new Promise(resolve => {
+        Modal.show('Review edit risks',
+            '<p>These changes need your attention before they are applied.</p>' +
+            higher.map(f => `<p><strong>${escapeHtml(f.schema)}:${escapeHtml(f.tag)}</strong><br>${escapeHtml(f.reason)}</p>`).join('') +
+            warnings.map(w => `<p class="text-error">${escapeHtml(w)}</p>`).join('') +
+            '<p>Proceed only if these are the intended changes.</p>' +
+            '<div class="modal-actions"><button class="btn btn-secondary" id="risk-cancel">Cancel</button>' +
+            '<button class="btn btn-danger" id="risk-accept">I understand — apply changes</button></div>');
+        let settled = false;
+        const finish = accepted => { if (!settled) { settled = true; Modal.onClose = null; Modal.hide(); resolve(accepted); } };
+        Modal.onClose = () => finish(false);
+        document.getElementById('risk-cancel').onclick = () => finish(false);
+        document.getElementById('risk-accept').onclick = () => finish(true);
+    });
+}

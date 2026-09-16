@@ -20,10 +20,9 @@ import logging
 import os
 import shutil
 import tempfile
-import time
-from contextlib import contextmanager
+from collections.abc import Generator
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
-from typing import Generator, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -68,8 +67,10 @@ ERROR_ACCESS_DENIED = 5
 # Win32 Structures
 # ─────────────────────────────────────────────────────────────────────
 
+
 class OVERLAPPED(ctypes.Structure):
     """Win32 OVERLAPPED structure for async I/O and file locking."""
+
     _fields_ = [
         ("Internal", ctypes.POINTER(ctypes.c_ulong)),
         ("InternalHigh", ctypes.POINTER(ctypes.c_ulong)),
@@ -78,85 +79,89 @@ class OVERLAPPED(ctypes.Structure):
         ("hEvent", ctypes.wintypes.HANDLE),
     ]
 
+
 # ─────────────────────────────────────────────────────────────────────
 # Win32 API Bindings
 # ─────────────────────────────────────────────────────────────────────
 
-kernel32 = ctypes.windll.kernel32
+kernel32 = None
+if os.name == "nt":
+    kernel32 = ctypes.windll.kernel32
 
-# CreateFileW
-kernel32.CreateFileW.restype = ctypes.wintypes.HANDLE
-kernel32.CreateFileW.argtypes = [
-    ctypes.wintypes.LPCWSTR,  # lpFileName
-    ctypes.wintypes.DWORD,    # dwDesiredAccess
-    ctypes.wintypes.DWORD,    # dwShareMode
-    ctypes.c_void_p,          # lpSecurityAttributes
-    ctypes.wintypes.DWORD,    # dwCreationDisposition
-    ctypes.wintypes.DWORD,    # dwFlagsAndAttributes
-    ctypes.wintypes.HANDLE,   # hTemplateFile
-]
+    # CreateFileW
+    kernel32.CreateFileW.restype = ctypes.wintypes.HANDLE
+    kernel32.CreateFileW.argtypes = [
+        ctypes.wintypes.LPCWSTR,  # lpFileName
+        ctypes.wintypes.DWORD,  # dwDesiredAccess
+        ctypes.wintypes.DWORD,  # dwShareMode
+        ctypes.c_void_p,  # lpSecurityAttributes
+        ctypes.wintypes.DWORD,  # dwCreationDisposition
+        ctypes.wintypes.DWORD,  # dwFlagsAndAttributes
+        ctypes.wintypes.HANDLE,  # hTemplateFile
+    ]
 
-# CloseHandle
-kernel32.CloseHandle.restype = ctypes.wintypes.BOOL
-kernel32.CloseHandle.argtypes = [ctypes.wintypes.HANDLE]
+    # CloseHandle
+    kernel32.CloseHandle.restype = ctypes.wintypes.BOOL
+    kernel32.CloseHandle.argtypes = [ctypes.wintypes.HANDLE]
 
-# ReplaceFileW
-kernel32.ReplaceFileW.restype = ctypes.wintypes.BOOL
-kernel32.ReplaceFileW.argtypes = [
-    ctypes.wintypes.LPCWSTR,  # lpReplacedFileName
-    ctypes.wintypes.LPCWSTR,  # lpReplacementFileName
-    ctypes.wintypes.LPCWSTR,  # lpBackupFileName (can be NULL)
-    ctypes.wintypes.DWORD,    # dwReplaceFlags
-    ctypes.c_void_p,          # lpExclude (reserved)
-    ctypes.c_void_p,          # lpReserved
-]
+    # ReplaceFileW
+    kernel32.ReplaceFileW.restype = ctypes.wintypes.BOOL
+    kernel32.ReplaceFileW.argtypes = [
+        ctypes.wintypes.LPCWSTR,  # lpReplacedFileName
+        ctypes.wintypes.LPCWSTR,  # lpReplacementFileName
+        ctypes.wintypes.LPCWSTR,  # lpBackupFileName (can be NULL)
+        ctypes.wintypes.DWORD,  # dwReplaceFlags
+        ctypes.c_void_p,  # lpExclude (reserved)
+        ctypes.c_void_p,  # lpReserved
+    ]
 
-# MoveFileExW
-kernel32.MoveFileExW.restype = ctypes.wintypes.BOOL
-kernel32.MoveFileExW.argtypes = [
-    ctypes.wintypes.LPCWSTR,  # lpExistingFileName
-    ctypes.wintypes.LPCWSTR,  # lpNewFileName
-    ctypes.wintypes.DWORD,    # dwFlags
-]
+    # MoveFileExW
+    kernel32.MoveFileExW.restype = ctypes.wintypes.BOOL
+    kernel32.MoveFileExW.argtypes = [
+        ctypes.wintypes.LPCWSTR,  # lpExistingFileName
+        ctypes.wintypes.LPCWSTR,  # lpNewFileName
+        ctypes.wintypes.DWORD,  # dwFlags
+    ]
 
-# GetFileAttributesW
-kernel32.GetFileAttributesW.restype = ctypes.wintypes.DWORD
-kernel32.GetFileAttributesW.argtypes = [ctypes.wintypes.LPCWSTR]
+    # GetFileAttributesW
+    kernel32.GetFileAttributesW.restype = ctypes.wintypes.DWORD
+    kernel32.GetFileAttributesW.argtypes = [ctypes.wintypes.LPCWSTR]
 
-# GetLastError
-kernel32.GetLastError.restype = ctypes.wintypes.DWORD
+    # GetLastError
+    kernel32.GetLastError.restype = ctypes.wintypes.DWORD
 
-# LockFileEx / UnlockFileEx
-kernel32.LockFileEx.restype = ctypes.wintypes.BOOL
-kernel32.LockFileEx.argtypes = [
-    ctypes.wintypes.HANDLE,    # hFile
-    ctypes.wintypes.DWORD,     # dwFlags
-    ctypes.wintypes.DWORD,     # dwReserved
-    ctypes.wintypes.DWORD,     # nNumberOfBytesToLockLow
-    ctypes.wintypes.DWORD,     # nNumberOfBytesToLockHigh
-    ctypes.POINTER(OVERLAPPED),  # lpOverlapped
-]
+    # LockFileEx / UnlockFileEx
+    kernel32.LockFileEx.restype = ctypes.wintypes.BOOL
+    kernel32.LockFileEx.argtypes = [
+        ctypes.wintypes.HANDLE,  # hFile
+        ctypes.wintypes.DWORD,  # dwFlags
+        ctypes.wintypes.DWORD,  # dwReserved
+        ctypes.wintypes.DWORD,  # nNumberOfBytesToLockLow
+        ctypes.wintypes.DWORD,  # nNumberOfBytesToLockHigh
+        ctypes.POINTER(OVERLAPPED),  # lpOverlapped
+    ]
 
-kernel32.UnlockFileEx.restype = ctypes.wintypes.BOOL
-kernel32.UnlockFileEx.argtypes = [
-    ctypes.wintypes.HANDLE,
-    ctypes.wintypes.DWORD,
-    ctypes.wintypes.DWORD,
-    ctypes.wintypes.DWORD,
-    ctypes.POINTER(OVERLAPPED),
-]
+    kernel32.UnlockFileEx.restype = ctypes.wintypes.BOOL
+    kernel32.UnlockFileEx.argtypes = [
+        ctypes.wintypes.HANDLE,
+        ctypes.wintypes.DWORD,
+        ctypes.wintypes.DWORD,
+        ctypes.wintypes.DWORD,
+        ctypes.POINTER(OVERLAPPED),
+    ]
 
-# GetFileSizeEx
-kernel32.GetFileSizeEx.restype = ctypes.wintypes.BOOL
-kernel32.GetFileSizeEx.argtypes = [
-    ctypes.wintypes.HANDLE,
-    ctypes.POINTER(ctypes.wintypes.LARGE_INTEGER),
-]
+    # GetFileSizeEx
+    kernel32.GetFileSizeEx.restype = ctypes.wintypes.BOOL
+    kernel32.GetFileSizeEx.argtypes = [
+        ctypes.wintypes.HANDLE,
+        ctypes.POINTER(ctypes.wintypes.LARGE_INTEGER),
+    ]
 
 
 # ─────────────────────────────────────────────────────────────────────
 # Custom Exceptions
 # ─────────────────────────────────────────────────────────────────────
+
 
 class Win32IOError(OSError):
     """Base exception for Win32 I/O operations."""
@@ -168,22 +173,26 @@ class Win32IOError(OSError):
 
 class FileInUseError(Win32IOError):
     """File is locked by another process."""
+
     pass
 
 
 class FilePermissionError(Win32IOError):
     """Insufficient permissions to access file."""
+
     pass
 
 
 class AtomicReplaceError(Win32IOError):
     """Failed to atomically replace a file."""
+
     pass
 
 
 # ─────────────────────────────────────────────────────────────────────
 # Win32IO Class
 # ─────────────────────────────────────────────────────────────────────
+
 
 class Win32IO:
     """
@@ -226,6 +235,8 @@ class Win32IO:
         Attempts to open the file with exclusive access. If it fails
         with a sharing violation, the file is in use.
         """
+        if kernel32 is None:
+            return False
         norm_path = Win32IO.normalize_path(path)
 
         handle = kernel32.CreateFileW(
@@ -252,6 +263,8 @@ class Win32IO:
 
         Verifies the file is not read-only and can be opened for writing.
         """
+        if kernel32 is None:
+            return os.access(path, os.W_OK)
         norm_path = Win32IO.normalize_path(path)
 
         # Check read-only attribute
@@ -305,70 +318,55 @@ class Win32IO:
         replacement: str | Path,
         backup: bool = True,
         backup_suffix: str = ".apex_backup",
-    ) -> Optional[Path]:
+    ) -> Path | None:
         """
         Atomically replace target with replacement using Win32 ReplaceFileW.
 
         If backup is True, creates a backup of the original file.
         Returns the backup path if created, None otherwise.
 
-        Falls back to MoveFileExW if ReplaceFileW fails (e.g., target
-        doesn't exist yet).
+        Backup creation must succeed before replacement. Existing backups are
+        retained, and a failed replacement is never retried with a weaker API.
         """
-        target_norm = Win32IO.normalize_path(target)
-        replacement_norm = Win32IO.normalize_path(replacement)
-
+        target = Path(target)
+        replacement = Path(replacement)
         backup_path = None
-        backup_norm = None
-
         if backup:
+            # Never overwrite an earlier recovery copy. A failed backup aborts commit.
+            import uuid
+
             backup_path = Path(str(target) + backup_suffix)
-            backup_norm = Win32IO.normalize_path(backup_path)
-
-        # Try ReplaceFileW first (preserves ACLs, timestamps)
-        if Path(str(target)).exists():
-            success = kernel32.ReplaceFileW(
-                target_norm,
-                replacement_norm,
-                backup_norm,
-                REPLACEFILE_IGNORE_MERGE_ERRORS,
-                None,
-                None,
-            )
-
-            if success:
-                logger.debug("Atomic replace succeeded: %s → %s", replacement, target)
-                return backup_path
-
-            error_code = kernel32.GetLastError()
-            logger.warning(
-                "ReplaceFileW failed (error %d), falling back to MoveFileExW",
-                error_code,
-            )
-
-        # Fallback: MoveFileExW (for new files or when ReplaceFileW fails)
-        if backup and Path(str(target)).exists():
-            # Manually create backup first
+            if backup_path.exists():
+                backup_path = Path(str(backup_path) + "." + uuid.uuid4().hex)
+            created = False
             try:
-                shutil.copy2(str(target), str(backup_path))
-            except OSError as e:
-                logger.warning("Backup creation failed: %s", e)
-                backup_path = None
-
-        success = kernel32.MoveFileExW(
-            replacement_norm,
-            target_norm,
-            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
-        )
-
-        if not success:
-            error_code = kernel32.GetLastError()
-            raise AtomicReplaceError(
-                f"Failed to replace {target} with {replacement}",
-                error_code,
+                with open(target, "rb") as src, open(backup_path, "xb") as dst:
+                    created = True
+                    shutil.copyfileobj(src, dst, 8 * 1024 * 1024)
+                    dst.flush()
+                    os.fsync(dst.fileno())
+                shutil.copystat(target, backup_path)
+            except Exception:
+                if created:
+                    backup_path.unlink(missing_ok=True)
+                raise
+        if kernel32 is None:
+            os.replace(replacement, target)
+        else:
+            success = kernel32.ReplaceFileW(
+                Win32IO.normalize_path(target),
+                Win32IO.normalize_path(replacement),
+                None,
+                0,
+                None,
+                None,
             )
-
-        logger.debug("MoveFileExW replace succeeded: %s → %s", replacement, target)
+            if not success:
+                code = kernel32.GetLastError()
+                if code in (ERROR_SHARING_VIOLATION, ERROR_LOCK_VIOLATION):
+                    raise FileInUseError("Target is in use", code)
+                # Do not fall back to a less strict operation on an existing target.
+                raise AtomicReplaceError(f"Failed to replace {target}; backup: {backup_path}", code)
         return backup_path
 
     @staticmethod
@@ -393,9 +391,22 @@ class Win32IO:
             FileInUseError: If the file is locked by another process
             FilePermissionError: If insufficient permissions
         """
+        if kernel32 is None:
+            import fcntl
+
+            with open(path, "r+b" if write else "rb") as f:
+                try:
+                    fcntl.flock(f, (fcntl.LOCK_SH if shared else fcntl.LOCK_EX) | fcntl.LOCK_NB)
+                except OSError as e:
+                    raise FileInUseError(f"File is locked: {path}") from e
+                try:
+                    yield f
+                finally:
+                    fcntl.flock(f, fcntl.LOCK_UN)
+            return
         norm_path = Win32IO.normalize_path(path)
         access = GENERIC_READ_WRITE if write else GENERIC_READ
-        share_mode = FILE_SHARE_READ if shared else FILE_SHARE_NONE
+        share_mode = FILE_SHARE_READ | FILE_SHARE_DELETE if shared else FILE_SHARE_NONE
 
         handle = kernel32.CreateFileW(
             norm_path,
@@ -438,6 +449,7 @@ class Win32IO:
         try:
             # Convert Win32 handle to Python file descriptor
             import msvcrt
+
             fd = msvcrt.open_osfhandle(handle, os.O_RDONLY if not write else os.O_RDWR)
             mode = "r+b" if write else "rb"
             f = os.fdopen(fd, mode, closefd=False)
@@ -455,12 +467,16 @@ class Win32IO:
                 0xFFFFFFFF,
                 ctypes.byref(overlapped),
             )
-            kernel32.CloseHandle(handle)
+            if "fd" in locals():
+                os.close(fd)
+            else:
+                kernel32.CloseHandle(handle)
 
 
 # ─────────────────────────────────────────────────────────────────────
 # Hash Utilities
 # ─────────────────────────────────────────────────────────────────────
+
 
 def compute_file_hash(
     path: str | Path,
@@ -475,6 +491,7 @@ def compute_file_hash(
     if algorithm == "xxhash":
         try:
             import xxhash
+
             hasher = xxhash.xxh3_128()
         except ImportError:
             logger.warning("xxhash not available, falling back to sha256")
@@ -491,174 +508,199 @@ def compute_file_hash(
     return hasher.hexdigest()
 
 
-def verify_bitstream_integrity(
-    original_path: str | Path,
-    modified_path: str | Path,
-    essence_offset: int,
-    essence_length: int,
-    algorithm: str = "xxhash",
-    chunk_size: int = 8 * 1024 * 1024,
-) -> bool:
-    """
-    Verify that the essence (bitstream) data has not been altered.
+def hash_regions(path, regions, algorithm=None):
+    """Hash bounded, validated regions, including their lengths and order."""
+    import struct
 
-    Compares hashes of the essence region in original and modified files.
-    This is the core safety check ensuring we never re-encode.
-    """
-    def hash_region(path, offset, length):
-        if algorithm == "xxhash":
-            try:
-                import xxhash
-                hasher = xxhash.xxh3_128()
-            except ImportError:
-                hasher = hashlib.sha256()
-        else:
-            hasher = hashlib.sha256()
+    if algorithm is None:
+        from apex_injector.config import get_config
 
-        with open(path, "rb") as f:
+        algorithm = get_config().engine.hash_algorithm
+    hasher = hashlib.sha256()
+    if algorithm == "xxhash":
+        import xxhash
+
+        hasher = xxhash.xxh3_128()
+    size = Path(path).stat().st_size
+    if not regions:
+        raise ValueError("No essence regions found")
+    with open(path, "rb") as f:
+        for offset, length in regions:
+            if offset < 0 or length <= 0 or offset + length > size:
+                raise ValueError("Invalid or truncated essence region")
+            hasher.update(struct.pack(">Q", length))
             f.seek(offset)
             remaining = length
-            while remaining > 0:
-                to_read = min(chunk_size, remaining)
-                chunk = f.read(to_read)
-                if not chunk:
-                    break
-                hasher.update(chunk)
-                remaining -= len(chunk)
+            while remaining:
+                data = f.read(min(8 * 1024 * 1024, remaining))
+                if not data:
+                    raise ValueError("Truncated essence")
+                hasher.update(data)
+                remaining -= len(data)
+    return hasher.hexdigest()
 
-        return hasher.hexdigest()
 
-    original_hash = hash_region(original_path, essence_offset, essence_length)
-    modified_hash = hash_region(modified_path, essence_offset, essence_length)
+def verify_bitstream_integrity(
+    original_path, modified_path, essence_offset, essence_length, algorithm="xxhash", chunk_size=8 * 1024 * 1024
+):
+    regions = [(essence_offset, essence_length)]
+    return hash_regions(original_path, regions, algorithm) == hash_regions(modified_path, regions, algorithm)
 
-    match = original_hash == modified_hash
-    if not match:
-        logger.error(
-            "BITSTREAM INTEGRITY FAILURE: %s vs %s",
-            original_hash,
-            modified_hash,
-        )
-    return match
+
+class VerificationError(RuntimeError):
+    pass
+
+
+@contextmanager
+def transaction_lock(path):
+    """Cross-process lock by canonical path, held through replacement.
+
+    Persistent lock files live in the system temporary directory: deleting a lock
+    file would let another process acquire a different inode for the same path.
+    """
+    name = hashlib.sha256(os.path.normcase(str(Path(path).resolve())).encode()).hexdigest()
+    directory = Path(tempfile.gettempdir()) / "apex-meta-injector-locks"
+    directory.mkdir(mode=0o700, exist_ok=True)
+    with open(directory / name, "a+b") as f:
+        if os.name == "nt":
+            import msvcrt
+
+            if f.tell() == 0:
+                f.write(b"0")
+                f.flush()
+            f.seek(0)
+            try:
+                msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
+            except OSError as e:
+                raise FileInUseError(f"Another injection is running: {path}") from e
+            try:
+                yield
+            finally:
+                f.seek(0)
+                msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+
+            try:
+                fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError as e:
+                raise FileInUseError(f"Another injection is running: {path}") from e
+            try:
+                yield
+            finally:
+                fcntl.flock(f, fcntl.LOCK_UN)
 
 
 class StagedTransaction:
-    """
-    Implements the Stage-Verify-Commit workflow for safe file modification.
-
-    Usage:
-        with StagedTransaction(target_path) as txn:
-            txn.write_staged(modified_data)
-            # Verify is automatic on commit
-        # File is atomically replaced on successful exit
-    """
+    """Copy/edit/validate/commit transaction with explicit terminal states."""
 
     def __init__(
         self,
-        target_path: str | Path,
-        backup: bool = True,
-        verify_essence: bool = True,
-        hash_algorithm: str = "xxhash",
+        target_path,
+        backup=True,
+        verify_essence=True,
+        hash_algorithm="xxhash",
+        fingerprint=None,
+        validate=None,
+        backup_suffix=".apex_backup",
+        staging_suffix=".apex_tmp",
     ):
-        self.target_path = Path(target_path)
+        self.target_path = Path(target_path).resolve()
         self.backup = backup
         self.verify_essence = verify_essence
         self.hash_algorithm = hash_algorithm
-        self.staging_path: Optional[Path] = None
-        self.backup_path: Optional[Path] = None
-        self.original_hash: Optional[str] = None
-        self.essence_offset: Optional[int] = None
-        self.essence_length: Optional[int] = None
-        self._committed = False
+        self.fingerprint = fingerprint
+        self.validate = validate
+        self.backup_suffix = backup_suffix
+        self.staging_suffix = staging_suffix
+        self.staging_path = None
+        self.backup_path = None
+        self.original_hash = None
+        self.essence_offset = None
+        self.essence_length = None
+        self._state = "new"
+        self._stack = ExitStack()
 
     def __enter__(self):
-        # Hash the original file
-        self.original_hash = compute_file_hash(
-            self.target_path,
-            self.hash_algorithm,
-        )
-        # Create staging file
-        self.staging_path = Win32IO.create_staging_file(self.target_path)
-        logger.debug("Staged transaction: %s → %s", self.target_path, self.staging_path)
-        return self
+        try:
+            self._stack.enter_context(transaction_lock(self.target_path))
+            self._stack.enter_context(Win32IO.locked_file(self.target_path, shared=True))
+            self._identity = self.target_path.stat()
+            if self.validate:
+                self.validate(self.target_path)
+            self.original_hash = compute_file_hash(self.target_path, self.hash_algorithm)
+            self._essence_hash = (
+                self.fingerprint(self.target_path) if self.verify_essence and self.fingerprint else None
+            )
+            self.staging_path = Win32IO.create_staging_file(self.target_path, self.staging_suffix)
+            self._state = "staged"
+            return self
+        except Exception:
+            self._stack.close()
+            raise
 
-    def write_staged(self, data: bytes):
-        """Write data to the staging file."""
-        with open(self.staging_path, "wb") as f:
-            f.write(data)
+    def write_staged(self, data):
+        self.staging_path.write_bytes(data)
 
     def copy_to_staging(self):
-        """Copy the original file to staging for in-place modification."""
-        shutil.copy2(str(self.target_path), str(self.staging_path))
+        shutil.copy2(self.target_path, self.staging_path)
 
-    def set_essence_region(self, offset: int, length: int):
-        """Set the essence (bitstream) region for integrity verification."""
-        self.essence_offset = offset
-        self.essence_length = length
+    def set_essence_region(self, offset, length):
+        self.essence_offset, self.essence_length = offset, length
+        self._essence_hash = hash_regions(self.target_path, [(offset, length)], self.hash_algorithm)
 
-    def verify(self) -> bool:
-        """
-        Verify the staged file's essence matches the original.
-
-        Returns True if verification passes or is not applicable.
-        """
+    def verify(self):
+        if self.validate:
+            self.validate(self.staging_path)
         if not self.verify_essence:
             return True
-
+        if self.fingerprint:
+            return self._essence_hash == self.fingerprint(self.staging_path)
         if self.essence_offset is None or self.essence_length is None:
-            logger.warning("No essence region set; skipping bitstream verification")
-            return True
-
-        return verify_bitstream_integrity(
-            self.target_path,
-            self.staging_path,
-            self.essence_offset,
-            self.essence_length,
-            self.hash_algorithm,
+            raise VerificationError("No essence verifier configured; refusing commit")
+        return self._essence_hash == hash_regions(
+            self.staging_path, [(self.essence_offset, self.essence_length)], self.hash_algorithm
         )
 
-    def commit(self) -> Optional[Path]:
-        """
-        Commit the staged file by atomically replacing the target.
-
-        Returns the backup path if created.
-
-        Raises:
-            AtomicReplaceError: If replacement fails
-            RuntimeError: If bitstream verification fails
-        """
+    def commit(self):
+        if self._state != "staged":
+            raise RuntimeError(f"Cannot commit transaction in state {self._state}")
         if not self.verify():
-            # Clean up staging file
-            self.staging_path.unlink(missing_ok=True)
-            raise RuntimeError(
-                f"Bitstream verification FAILED for {self.target_path}. "
-                "Staged file has been deleted to prevent data corruption."
-            )
-
+            raise VerificationError("Bitstream verification failed; original preserved")
+        current = self.target_path.stat()
+        if (current.st_dev, current.st_ino, current.st_size, current.st_mtime_ns) != (
+            self._identity.st_dev,
+            self._identity.st_ino,
+            self._identity.st_size,
+            self._identity.st_mtime_ns,
+        ) or compute_file_hash(self.target_path, self.hash_algorithm) != self.original_hash:
+            raise VerificationError("Source changed during injection; refusing to overwrite it")
+        with open(self.staging_path, "r+b") as f:
+            f.flush()
+            os.fsync(f.fileno())
         self.backup_path = Win32IO.atomic_replace(
-            self.target_path,
-            self.staging_path,
-            backup=self.backup,
+            self.target_path, self.staging_path, backup=self.backup, backup_suffix=self.backup_suffix
         )
-        self._committed = True
-        logger.info("Committed: %s", self.target_path)
+        self._state = "committed"
         return self.backup_path
 
     def rollback(self):
-        """Clean up staging file without committing."""
-        if self.staging_path and self.staging_path.exists():
+        if self._state == "committed":
+            return
+        if self.staging_path:
             self.staging_path.unlink(missing_ok=True)
-            logger.debug("Rolled back: %s", self.staging_path)
+        self._state = "aborted"
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        if exc_type is not None:
-            self.rollback()
-            return False
-
-        if not self._committed:
-            try:
-                self.commit()
-            except Exception:
+        try:
+            if exc_type is not None:
                 self.rollback()
-                raise
-
+            elif self._state == "staged":
+                try:
+                    self.commit()
+                except Exception:
+                    self.rollback()
+                    raise
+        finally:
+            self._stack.close()
         return False

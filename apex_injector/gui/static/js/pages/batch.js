@@ -59,9 +59,17 @@ Pages.batch = {
         </div>`;
 
         // Register WebSocket handlers
-        App.on('batch_progress', (data) => this.updateProgress(data));
-        App.on('file_complete', (data) => this.onFileComplete(data));
-        App.on('batch_complete', (data) => this.onBatchComplete(data));
+        if (!this.handlersRegistered) {
+            App.on('batch_progress', data => { if (data.batch_id === this.batchId) this.updateProgress(data); });
+            App.on('file_complete', data => { if (data.batch_id === this.batchId) this.onFileComplete(data); });
+            App.on('batch_complete', data => { if (data.batch_id === this.batchId) this.onBatchComplete(data); });
+            App.on('batch_error', data => { if (data.batch_id === this.batchId) Toast.show(data.error, 'error'); });
+            this.handlersRegistered = true;
+        }
+        if (App.state.pendingManifest) {
+            document.getElementById('batch-manifest-path').value = App.state.pendingManifest;
+            App.state.pendingManifest = null;
+        }
     },
 
     async startBatch() {
@@ -72,9 +80,13 @@ Pages.batch = {
         }
 
         try {
+            const preview = await App.api('/batch/preview', {method:'POST', body:{manifest_path:manifestPath}});
+            const combined = {fields: preview.entries.flatMap(entry => entry.fields.map(f => ({...f, tag: `${entry.file} — ${f.tag}`}))),
+                              protection_warnings: [...new Set(preview.entries.flatMap(entry => entry.protection_warnings))]};
+            if (!await confirmEditRisk(combined)) return;
             const result = await App.api('/batch', {
                 method: 'POST',
-                body: { manifest_path: manifestPath }
+                body: { manifest_path: manifestPath, acknowledge_risk:true }
             });
 
             this.batchId = result.batch_id;
@@ -86,6 +98,9 @@ Pages.batch = {
             this.updateStats({ total: result.total_files, queued: result.total_files, running: 0, completed: 0, failed: 0 });
             LogConsole.add(`Batch started: ${result.total_files} files (ID: ${result.batch_id})`, 'info');
             Toast.show(`Batch started: ${result.total_files} files`, 'info');
+            clearInterval(this.pollTimer);
+            this.pollTimer = setInterval(() => this.refreshStatus(), 1000);
+            await this.refreshStatus();
 
         } catch (e) {
             Toast.show(`Failed to start batch: ${e.message}`, 'error');
@@ -97,7 +112,7 @@ Pages.batch = {
         const text = document.getElementById('batch-progress-text');
         const eta = document.getElementById('batch-eta');
         if (fill) fill.style.width = `${data.percent}%`;
-        if (text) text.textContent = `${data.percent}% (${data.completed + data.failed}/${data.total})`;
+        if (text) text.textContent = `${data.percent}% (${data.completed + data.failed + (data.cancelled || 0)}/${data.total})`;
         if (eta) eta.textContent = data.eta_ms > 0 ? `ETA: ${formatDuration(data.eta_ms)}` : 'ETA: —';
         this.updateStats(data);
     },
@@ -112,29 +127,51 @@ Pages.batch = {
             <div class="stat-card"><div class="stat-icon red"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg></div><div class="stat-info"><div class="stat-value">${data.failed || 0}</div><div class="stat-label">Errors</div></div></div>`;
     },
 
+    async refreshStatus() {
+        if (!this.batchId) return;
+        try {
+            const status = await App.api(`/batch/${this.batchId}/status`);
+            if (status.result) this.onBatchComplete({batch_id:this.batchId, status:status.status, ...status.result});
+            else if (status.status === 'failed') {
+                clearInterval(this.pollTimer);
+                Toast.show(status.error, 'error');
+            }
+        } catch (e) { console.error(e); }
+    },
+
+    renderResults() {
+        const target = document.getElementById('batch-file-table');
+        if (target) target.innerHTML = FileTable.create(this.fileResults.map(r => ({...r, error:r.message})), {showStatus:true});
+    },
+
     onFileComplete(data) {
-        this.fileResults.unshift(data);
-        if (this.fileResults.length > 100) this.fileResults = this.fileResults.slice(0, 100);
-        const table = document.getElementById('batch-file-table');
-        if (table) {
-            const files = this.fileResults.map(r => ({ file: r.file, name: r.file.split(/[/\\]/).pop(), container: null, codec: '', size: 0, status: r.status }));
-            table.innerHTML = FileTable.create(files, { showStatus: true });
-        }
-        const logType = data.status === 'success' ? 'success' : 'error';
-        LogConsole.add(`${data.file} — ${data.status} (${formatDuration(data.duration_ms)})`, logType);
+        const index = this.fileResults.findIndex(r => r.file === data.file);
+        if (index >= 0) this.fileResults[index] = data;
+        else this.fileResults.push(data);
+        this.renderResults();
+        LogConsole.add(`${data.file} — ${data.status}: ${data.message || ''}`, data.status === 'success' ? 'success' : 'error');
     },
 
     onBatchComplete(data) {
-        LogConsole.add(`Batch complete: ${data.succeeded} succeeded, ${data.failed} failed in ${formatDuration(data.elapsed_ms)}`, 'info');
-        document.getElementById('batch-cancel-btn').textContent = 'Done';
+        clearInterval(this.pollTimer);
+        if (data.file_results) this.fileResults = data.file_results;
+        this.renderResults();
+        this.updateProgress({total:data.total_files, completed:data.succeeded, failed:data.failed,
+                             cancelled:data.skipped, percent:100, eta_ms:0});
+        if (this.completedBatchId !== data.batch_id) {
+            LogConsole.add(`Batch ${data.status || 'completed'}: ${data.succeeded} succeeded, ${data.failed} failed, ${data.skipped || 0} skipped`, 'info');
+            this.completedBatchId = data.batch_id;
+        }
+        const button = document.getElementById('batch-cancel-btn');
+        if (button) button.textContent = 'Done';
     },
 
     async cancelBatch() {
         if (this.batchId) {
             try {
                 await App.api(`/batch/${this.batchId}/cancel`, { method: 'POST' });
-                Toast.show('Batch cancelled', 'warning');
-                LogConsole.add('Batch cancelled by user', 'warning');
+                Toast.show('Cancellation requested; active files finish safely', 'warning');
+                LogConsole.add('Cancellation requested', 'warning');
             } catch (e) { console.error(e); }
         }
         document.getElementById('batch-progress-card').classList.add('hidden');

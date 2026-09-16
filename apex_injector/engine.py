@@ -12,20 +12,20 @@ Orchestrates the batch metadata injection pipeline:
 from __future__ import annotations
 
 import logging
+import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import StrEnum
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any
 
 from apex_injector.codec_manifest import (
-    ContainerFormat,
     detect_container,
     find_mapping,
 )
 from apex_injector.config import get_config
 from apex_injector.handlers import (
-    ContainerHandler,
     FileAnalysis,
     InjectionResult,
     InjectionStatus,
@@ -33,20 +33,21 @@ from apex_injector.handlers import (
     get_handler,
 )
 from apex_injector.handlers.exiftool_bridge import get_exiftool_bridge
-from apex_injector.manifest import Manifest, ManifestEntry
+from apex_injector.manifest import Manifest
 from apex_injector.thread_pool import InjectionPool, PoolProgress, TaskResult
 from apex_injector.win32_io import (
     FileInUseError,
     StagedTransaction,
+    VerificationError,
     Win32IO,
-    compute_file_hash,
 )
 
 logger = logging.getLogger(__name__)
 
 
-class ErrorClass(str, Enum):
+class ErrorClass(StrEnum):
     """Classification of injection errors."""
+
     FILE_IN_USE = "file_in_use"
     HEADER_CORRUPT = "header_corrupt"
     COMPLEX_WRAP = "complex_wrap"
@@ -60,6 +61,7 @@ class ErrorClass(str, Enum):
 @dataclass
 class BatchResult:
     """Result of a complete batch injection operation."""
+
     total_files: int = 0
     succeeded: int = 0
     failed: int = 0
@@ -92,9 +94,9 @@ class InjectionEngine:
 
     def __init__(
         self,
-        on_progress: Optional[Callable[[PoolProgress], None]] = None,
-        on_file_complete: Optional[Callable[[InjectionResult], None]] = None,
-        on_complex_wrap: Optional[Callable[[Path, str], bool]] = None,
+        on_progress: Callable[[PoolProgress], None] | None = None,
+        on_file_complete: Callable[[InjectionResult], None] | None = None,
+        on_complex_wrap: Callable[[Path, str], bool] | None = None,
     ):
         """
         Initialize the injection engine.
@@ -109,7 +111,8 @@ class InjectionEngine:
         self._on_file_complete = on_file_complete
         self._on_complex_wrap = on_complex_wrap
         self._config = get_config()
-        self._pool: Optional[InjectionPool] = None
+        self._pool: InjectionPool | None = None
+        self._cancel_requested = threading.Event()
 
         # Import all handlers to trigger auto-registration
         self._ensure_handlers_loaded()
@@ -117,11 +120,11 @@ class InjectionEngine:
     def _ensure_handlers_loaded(self):
         """Ensure all container handlers are imported and registered."""
         try:
-            import apex_injector.handlers.isobmff_handler  # noqa: F401
-            import apex_injector.handlers.mxf_handler  # noqa: F401
-            import apex_injector.handlers.matroska_handler  # noqa: F401
-            import apex_injector.handlers.bwf_handler  # noqa: F401
             import apex_injector.handlers.aiff_handler  # noqa: F401
+            import apex_injector.handlers.bwf_handler  # noqa: F401
+            import apex_injector.handlers.isobmff_handler  # noqa: F401
+            import apex_injector.handlers.matroska_handler  # noqa: F401
+            import apex_injector.handlers.mxf_handler  # noqa: F401
         except ImportError as e:
             logger.warning("Some handlers could not be loaded: %s", e)
 
@@ -149,7 +152,9 @@ class InjectionEngine:
         # Find handler
         handler = get_handler(container)
         if handler:
-            return handler.analyze(file_path)
+            analysis = handler.analyze(file_path)
+            analysis.mapping = find_mapping(container, analysis.codec_fourcc)
+            return analysis
 
         # Fallback to ExifTool bridge
         bridge = get_exiftool_bridge()
@@ -164,6 +169,9 @@ class InjectionEngine:
         """
         Scan a directory and analyze all supported media files.
         """
+        directory = Path(directory)
+        if not directory.is_dir():
+            raise ValueError(f"Not a directory: {directory}")
         results = []
         from apex_injector.codec_manifest import EXTENSION_MAP
 
@@ -183,12 +191,12 @@ class InjectionEngine:
         """
         Inject metadata into a single file using Stage-Verify-Commit.
         """
-        file_path = Path(file_path)
+        file_path = Path(file_path).resolve()
         result = InjectionResult(file_path=file_path, status=InjectionStatus.FAILED)
         start = time.perf_counter()
 
         # Pre-flight checks
-        if not file_path.exists():
+        if not file_path.is_file():
             result.message = "File not found"
             result.details["error_class"] = ErrorClass.FILE_NOT_FOUND.value
             return result
@@ -215,87 +223,80 @@ class InjectionEngine:
             # Fall back to ExifTool
             handler = get_exiftool_bridge()
 
-        # Filter payload to supported schemas
-        filtered = handler.filter_payload(payload)
-        if not filtered.fields:
-            # Try ExifTool bridge for unsupported schemas
+        # Route the whole payload; unsupported fields never disappear silently.
+        container_handler = handler
+        if payload.fields and any(not handler.supports_schema(f.schema) for f in payload.fields):
             bridge = get_exiftool_bridge()
-            filtered = bridge.filter_payload(payload)
-            if filtered.fields:
+            if (
+                container in bridge.supported_containers
+                and self._config.tools.exiftool
+                and all(bridge.supports_schema(f.schema) for f in payload.fields)
+            ):
                 handler = bridge
             else:
-                result.message = "No compatible metadata schemas for this container"
-                result.details["error_class"] = ErrorClass.UNSUPPORTED_CODEC.value
+                result.status = InjectionStatus.UNSUPPORTED_FIELD
+                result.fields_failed = len(payload.fields)
+                result.message = "Unsupported schema or missing ExifTool; no changes made"
                 return result
+        if not payload.fields:
+            result.message = "No metadata supplied"
+            return result
 
-        # Stage-Verify-Commit workflow
+        from apex_injector.risk import assess_risks
+
+        risks = assess_risks(payload)
+        if risks["has_read_only"] or (risks["requires_acknowledgement"] and not payload.acknowledge_risk):
+            result.status = InjectionStatus.UNSUPPORTED_FIELD
+            result.fields_failed = len(payload.fields)
+            result.details["risks"] = risks
+            result.message = (
+                "Read-only tags cannot be changed"
+                if risks["has_read_only"]
+                else "Higher-risk metadata edit requires acknowledgement; preview the affected tags first"
+            )
+            return result
+
         try:
             with StagedTransaction(
                 file_path,
                 backup=self._config.engine.create_backups,
                 verify_essence=self._config.engine.verify_bitstream,
                 hash_algorithm=self._config.engine.hash_algorithm,
+                fingerprint=handler.essence_fingerprint,
+                validate=container_handler.validate,
+                backup_suffix=self._config.engine.backup_suffix,
+                staging_suffix=self._config.engine.staging_suffix,
             ) as txn:
-                # Set essence region for verification
-                try:
-                    offset, length = handler.get_essence_region(file_path)
-                    txn.set_essence_region(offset, length)
-                except Exception as e:
-                    logger.debug("Could not determine essence region: %s", e)
-
-                # STAGE: Inject into staging file
-                handler_result = handler.inject(file_path, filtered, txn.staging_path)
-
-                # Handle Complex Wrap
-                if handler_result.status == InjectionStatus.COMPLEX_WRAP_REQUIRED:
-                    if self._on_complex_wrap:
-                        approved = self._on_complex_wrap(
-                            file_path,
-                            handler_result.complex_wrap_info or "Complex Wrap needed",
-                        )
-                        if approved:
-                            # Execute complex wrap
-                            from apex_injector.handlers.mxf_handler import MXFHandler
-                            if isinstance(handler, MXFHandler):
-                                handler_result = handler.execute_complex_wrap(
-                                    file_path, filtered, txn.staging_path,
-                                )
-                            else:
-                                handler_result.message = "Complex Wrap not supported for this handler"
-                        else:
-                            result.status = InjectionStatus.COMPLEX_WRAP_REQUIRED
-                            result.message = "User declined Complex Wrap"
-                            result.complex_wrap_info = handler_result.complex_wrap_info
-                            txn.rollback()
-                            return result
+                result = handler.inject(file_path, payload, txn.staging_path)
+                if result.status == InjectionStatus.COMPLEX_WRAP_REQUIRED:
+                    if self._on_complex_wrap and self._on_complex_wrap(file_path, result.complex_wrap_info or ""):
+                        result = handler.execute_complex_wrap(file_path, payload, txn.staging_path)
                     else:
-                        result.status = InjectionStatus.COMPLEX_WRAP_REQUIRED
-                        result.complex_wrap_info = handler_result.complex_wrap_info
                         txn.rollback()
-                        return result
-
-                if handler_result.status in (InjectionStatus.SUCCESS, InjectionStatus.PARTIAL):
-                    # VERIFY + COMMIT handled by StagedTransaction.__exit__
-                    result = handler_result
-                    result.backup_path = txn.backup_path
-                else:
+                if result.status != InjectionStatus.SUCCESS or result.fields_written != len(payload.fields):
                     txn.rollback()
-                    result = handler_result
-
-        except FileInUseError:
-            result.message = "File is locked by another process"
-            result.details["error_class"] = ErrorClass.FILE_IN_USE.value
-        except RuntimeError as e:
-            if "Bitstream verification" in str(e):
-                result.message = str(e)
-                result.details["error_class"] = ErrorClass.VERIFICATION_FAILED.value
-            else:
-                raise
+                    if result.status == InjectionStatus.SUCCESS:
+                        result.status = InjectionStatus.FAILED
+                        result.message = "Writer did not confirm every requested field"
+                    # No partial commits: a failed request leaves its source intact.
+                    result.fields_written = 0
+                    result.fields_failed = len(payload.fields)
+            if result.status == InjectionStatus.SUCCESS:
+                result.backup_path = txn.backup_path
         except Exception as e:
-            result.message = f"Injection error: {e}"
-            result.details["error_class"] = ErrorClass.HANDLER_ERROR.value
-            logger.error("Injection failed for %s: %s", file_path, e, exc_info=True)
-
+            result.status = InjectionStatus.FAILED
+            result.fields_written = 0
+            result.fields_failed = len(payload.fields)
+            result.message = str(e)
+            error_class = (
+                ErrorClass.FILE_IN_USE
+                if isinstance(e, FileInUseError)
+                else ErrorClass.VERIFICATION_FAILED
+                if isinstance(e, VerificationError)
+                else ErrorClass.HANDLER_ERROR
+            )
+            result.details["error_class"] = error_class.value
+            logger.warning("Injection failed for %s: %s", file_path, e)
         result.duration_ms = (time.perf_counter() - start) * 1000
         return result
 
@@ -319,10 +320,13 @@ class InjectionEngine:
             last_result = result
 
             if attempt < config.file_in_use_retries:
-                wait = config.file_in_use_backoff_base * (2 ** attempt)
+                wait = config.file_in_use_backoff_base * (2**attempt)
                 logger.info(
                     "File in use, retrying in %.1fs (attempt %d/%d): %s",
-                    wait, attempt + 1, config.file_in_use_retries, file_path,
+                    wait,
+                    attempt + 1,
+                    config.file_in_use_retries,
+                    file_path,
                 )
                 time.sleep(wait)
 
@@ -340,19 +344,40 @@ class InjectionEngine:
         if not manifest.entries:
             return batch
 
-        # Build task list
+        # Duplicate paths otherwise race and make field precedence nondeterministic.
+        canonical = [entry.file_path.resolve() for entry in manifest.entries]
+        if len(set(canonical)) != len(canonical):
+            batch.failed = batch.total_files
+            batch.errors.append(
+                {"error": "Duplicate file paths in manifest; no files processed", "class": "duplicate_file"}
+            )
+            return batch
         tasks = []
         for i, entry in enumerate(manifest.entries):
             task_id = f"inject_{i}_{entry.file_path.name}"
-            tasks.append((
-                task_id,
-                self.inject_with_retry,
-                (entry.file_path, entry.metadata),
-                {},
-            ))
+            tasks.append(
+                (
+                    task_id,
+                    self.inject_with_retry,
+                    (entry.file_path, entry.metadata),
+                    {},
+                )
+            )
 
         # Run through thread pool
+        paths = {task[0]: entry.file_path for task, entry in zip(tasks, manifest.entries)}
+
         def on_task_done(task_result: TaskResult):
+            if task_result.status.value == "cancelled":
+                batch.skipped += 1
+                return
+            if task_result.result is None:
+                task_result.result = InjectionResult(
+                    file_path=paths[task_result.task_id],
+                    status=InjectionStatus.FAILED,
+                    message=task_result.error or "Worker failed",
+                    details={"error_class": "handler_error"},
+                )
             if task_result.result:
                 inj_result = task_result.result
                 batch.file_results.append(inj_result)
@@ -361,15 +386,15 @@ class InjectionEngine:
                     batch.succeeded += 1
                 elif inj_result.status == InjectionStatus.COMPLEX_WRAP_REQUIRED:
                     batch.complex_wrap_pending += 1
-                elif inj_result.status == InjectionStatus.PARTIAL:
-                    batch.succeeded += 1  # Partial counts as success
                 else:
                     batch.failed += 1
-                    batch.errors.append({
-                        "file": str(inj_result.file_path),
-                        "error": inj_result.message,
-                        "class": inj_result.details.get("error_class", "unknown"),
-                    })
+                    batch.errors.append(
+                        {
+                            "file": str(inj_result.file_path),
+                            "error": inj_result.message,
+                            "class": inj_result.details.get("error_class", "unknown"),
+                        }
+                    )
 
                 if self._on_file_complete:
                     self._on_file_complete(inj_result)
@@ -379,6 +404,8 @@ class InjectionEngine:
             on_task_complete=on_task_done,
         )
 
+        if self._cancel_requested.is_set():
+            self._pool.cancel()
         self._pool.submit_batch(tasks)
 
         batch.elapsed_ms = (time.perf_counter() - start) * 1000
@@ -386,7 +413,9 @@ class InjectionEngine:
 
         logger.info(
             "Batch complete: %d succeeded, %d failed, %d pending, %.1fs",
-            batch.succeeded, batch.failed, batch.complex_wrap_pending,
+            batch.succeeded,
+            batch.failed,
+            batch.complex_wrap_pending,
             batch.elapsed_ms / 1000,
         )
 
@@ -394,5 +423,6 @@ class InjectionEngine:
 
     def cancel_batch(self):
         """Cancel the current batch operation."""
+        self._cancel_requested.set()
         if self._pool:
             self._pool.cancel()

@@ -18,14 +18,14 @@ const FileTable = {
             const name = f.name || (f.file ? f.file.split(/[/\\]/).pop() : 'Unknown');
             const path = f.file || '';
             html += `<tr data-index="${i}" ${onRowClick ? 'style="cursor:pointer"' : ''}>`;
-            html += `<td><div class="file-name">${name}</div><div class="file-path truncate">${path}</div></td>`;
+            html += `<td><div class="file-name">${escapeHtml(name)}</div><div class="file-path truncate">${escapeHtml(path)}</div></td>`;
             html += `<td>${getContainerBadge(f.container)}</td>`;
-            html += `<td class="text-secondary text-sm">${f.codec || '—'}</td>`;
+            html += `<td class="text-secondary text-sm">${escapeHtml(f.codec || '—')}</td>`;
             html += `<td class="file-size">${formatBytes(f.size || 0)}</td>`;
             if (showStatus) html += `<td>${getStatusPill(f.status || 'queued')}</td>`;
             const risk = f.complex_wrap_risk || 'none';
             const riskDot = risk === 'none' ? 'compat-green' : risk === 'high' ? 'compat-red' : 'compat-yellow';
-            html += `<td><span class="compat-dot ${riskDot}"></span></td>`;
+            html += `<td><span class="compat-dot ${riskDot}"></span> ${escapeHtml(f.error || (f.injectable === false ? "Read-only" : "Review before editing"))}</td>`;
             if (showActions) html += `<td><button class="btn btn-sm btn-ghost" onclick="event.stopPropagation()">⋮</button></td>`;
             html += '</tr>';
         });

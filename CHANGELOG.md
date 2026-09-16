@@ -2,6 +2,38 @@
 
 All notable changes to Apex Meta-Injector will be documented in this file.
 
+## [0.0.2] - 2026-09-16
+
+### Fixed
+
+- Fail-closed staged transactions, source locking, source-change detection, unique
+  backups and accurate results after verification and commit failures.
+- MP4/MOV XMP growth/shrink corruption and media verification after relocation.
+- Streaming MP4/WAV writes; preservation of unrelated XML, RIFF chunks, BEXT bytes
+  and Matroska tags. WAV ID3 writes and AIFF save errors are handled correctly.
+- Unsupported/no-op fields no longer count as successful writes. MXF and RF64
+  writes are explicitly disabled instead of unsafe re-wrapping or false success.
+- CLI routing, failure exit codes, CSV export, relative manifest paths and duplicate
+  rejection. Batch errors and cancellation retain accurate final results.
+- Desktop full-path selection, persistent settings, batch isolation, escaped
+  metadata display and packaged tool-status imports.
+
+### Added
+
+- Deep ExifTool inventory with embedded/duplicate/unknown tags and explicit
+  group-qualified edits, structured JSON import and metadata readback.
+- Visible per-field risks, high-risk acknowledgement, read-only indicators and
+  warnings when backup or verification protection is disabled.
+- Regression and real-media integration tests, an optional browser test, Linux /
+  Windows CI, wheel checks and a separate console executable in Windows builds.
+
+### Status
+
+- Alpha: container-level support does not certify every codec/camera/NLE workflow.
+- Rotation editing remains deferred. MXF is read-only; RF64 writing is unsupported.
+- Earlier 0.0.1 feature descriptions below describe initial claims, several of which
+  were incomplete. The README's current capability table supersedes those claims.
+
 ## [0.0.1] - 2026-04-10
 
 ### Added

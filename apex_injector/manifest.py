@@ -12,7 +12,7 @@ import json
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 from apex_injector.codec_manifest import MetadataSchema
 from apex_injector.handlers import MetadataField, MetadataPayload
@@ -23,6 +23,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class ManifestEntry:
     """A single entry in a batch manifest."""
+
     file_path: Path
     metadata: MetadataPayload
     priority: int = 0
@@ -32,8 +33,9 @@ class ManifestEntry:
 @dataclass
 class Manifest:
     """A collection of manifest entries for batch processing."""
+
     entries: list[ManifestEntry] = field(default_factory=list)
-    source_path: Optional[Path] = None
+    source_path: Path | None = None
     errors: list[str] = field(default_factory=list)
 
     @property
@@ -47,10 +49,13 @@ class Manifest:
         """Validate all entries. Returns list of warnings."""
         warnings = []
         for i, entry in enumerate(self.entries):
-            if not entry.file_path.exists():
+            if not entry.file_path.is_file():
                 warnings.append(f"Entry {i}: File not found: {entry.file_path}")
             if not entry.metadata.fields:
                 warnings.append(f"Entry {i}: No metadata fields defined for {entry.file_path}")
+        canonical = [entry.file_path.resolve() for entry in self.entries]
+        if len(set(canonical)) != len(canonical):
+            warnings.append("Duplicate file paths; combine their metadata into a single entry")
         return warnings
 
 
@@ -92,7 +97,7 @@ def parse_json_manifest(path: Path) -> Manifest:
     manifest = Manifest(source_path=path)
 
     try:
-        with open(path, "r", encoding="utf-8") as f:
+        with open(path, encoding="utf-8") as f:
             data = json.load(f)
 
         if not isinstance(data, list):
@@ -109,6 +114,8 @@ def parse_json_manifest(path: Path) -> Manifest:
                 continue
 
             file_path = Path(file_path)
+            if not file_path.is_absolute():
+                file_path = path.resolve().parent / file_path
 
             # Check for nested metadata format
             metadata_dict = item.get("metadata")
@@ -157,7 +164,7 @@ def parse_csv_manifest(path: Path) -> Manifest:
     manifest = Manifest(source_path=path)
 
     try:
-        with open(path, "r", encoding="utf-8-sig") as f:
+        with open(path, encoding="utf-8-sig") as f:
             reader = csv.DictReader(f)
 
             if not reader.fieldnames:
@@ -185,7 +192,7 @@ def parse_csv_manifest(path: Path) -> Manifest:
 
                 flat = {}
                 for col in metadata_cols:
-                    value = row.get(col, "").strip()
+                    value = (row.get(col) or "").strip()
                     if value:
                         # Handle semicolon-separated values as lists
                         if ";" in value:
@@ -196,7 +203,7 @@ def parse_csv_manifest(path: Path) -> Manifest:
                 payload = _parse_flat_metadata(flat) if flat else MetadataPayload()
 
                 entry = ManifestEntry(
-                    file_path=Path(file_path),
+                    file_path=(Path(file_path) if Path(file_path).is_absolute() else path.resolve().parent / file_path),
                     metadata=payload,
                 )
                 manifest.entries.append(entry)
@@ -214,12 +221,7 @@ def parse_manifest(path: Path) -> Manifest:
         return parse_json_manifest(path)
     elif suffix == ".csv":
         return parse_csv_manifest(path)
-    else:
-        # Try JSON first, then CSV
-        try:
-            return parse_json_manifest(path)
-        except Exception:
-            return parse_csv_manifest(path)
+    return Manifest(source_path=path, errors=["Manifest must have a .json or .csv extension"])
 
 
 def build_manifest_from_directory(
@@ -239,10 +241,12 @@ def build_manifest_from_directory(
     pattern = f"**/{glob_pattern}" if recursive else glob_pattern
     for file_path in directory.glob(pattern):
         if file_path.is_file() and file_path.suffix.lower() in EXTENSION_MAP:
-            manifest.entries.append(ManifestEntry(
-                file_path=file_path,
-                metadata=metadata,
-            ))
+            manifest.entries.append(
+                ManifestEntry(
+                    file_path=file_path,
+                    metadata=metadata,
+                )
+            )
 
     manifest.entries.sort(key=lambda e: str(e.file_path))
     return manifest
@@ -252,81 +256,22 @@ def build_manifest_from_directory(
 # Schema detection helpers
 # ─────────────────────────────────────────────────────────────────────
 
-# Known field names and their likely schema
-FIELD_SCHEMA_MAP: dict[str, MetadataSchema] = {
-    # XMP / Dublin Core
-    "dc:Title": MetadataSchema.XMP,
-    "dc:Creator": MetadataSchema.XMP,
-    "dc:Description": MetadataSchema.XMP,
-    "dc:Subject": MetadataSchema.XMP,
-    "dc:Rights": MetadataSchema.XMP,
-    "dc:Date": MetadataSchema.XMP,
-    "xmp:CreateDate": MetadataSchema.XMP,
-    "xmp:ModifyDate": MetadataSchema.XMP,
-    # IPTC
-    "IPTC:Keywords": MetadataSchema.IPTC,
-    "IPTC:Caption-Abstract": MetadataSchema.IPTC,
-    "IPTC:Headline": MetadataSchema.IPTC,
-    "IPTC:By-line": MetadataSchema.IPTC,
-    # EXIF
-    "EXIF:Artist": MetadataSchema.EXIF,
-    "EXIF:Copyright": MetadataSchema.EXIF,
-    "EXIF:ImageDescription": MetadataSchema.EXIF,
-    # BWF
-    "Description": MetadataSchema.BEXT,
-    "Originator": MetadataSchema.BEXT,
-    "OriginatorReference": MetadataSchema.BEXT,
-    "OriginationDate": MetadataSchema.BEXT,
-    "OriginationTime": MetadataSchema.BEXT,
-    "CodingHistory": MetadataSchema.BEXT,
-}
-
-# Common field names that default to XMP
-XMP_DEFAULT_FIELDS = {
-    "title", "Title", "artist", "Artist", "creator", "Creator",
-    "description", "Description", "keywords", "Keywords",
-    "subject", "Subject", "rights", "Rights", "copyright", "Copyright",
-    "date", "Date", "genre", "Genre", "comment", "Comment",
-    "album", "Album", "writer", "Writer",
-}
-
 
 def _parse_flat_metadata(flat: dict[str, Any]) -> MetadataPayload:
-    """Parse flat key-value metadata into a typed MetadataPayload."""
+    """Resolve explicit schema prefixes without losing the actual namespace."""
     payload = MetadataPayload()
-
+    schema_aliases = {s.value: s for s in MetadataSchema}
+    schema_aliases["id3"] = MetadataSchema.ID3V24
     for key, value in flat.items():
-        # Check explicit schema map
-        schema = FIELD_SCHEMA_MAP.get(key)
-        if schema:
-            payload.fields.append(MetadataField(schema=schema, key=key, value=value))
-            continue
-
-        # Check if key has a schema prefix (e.g. "XMP:Title")
-        if ":" in key:
-            prefix, _, tag = key.partition(":")
-            prefix_lower = prefix.lower()
-            if prefix_lower in ("xmp", "xmp-dc", "dc"):
-                schema = MetadataSchema.XMP
-            elif prefix_lower == "iptc":
-                schema = MetadataSchema.IPTC
-            elif prefix_lower == "exif":
-                schema = MetadataSchema.EXIF
-            elif prefix_lower == "id3":
-                schema = MetadataSchema.ID3V24
-            elif prefix_lower == "bext":
-                schema = MetadataSchema.BEXT
-            else:
-                schema = MetadataSchema.XMP
-
-            payload.fields.append(MetadataField(schema=schema, key=tag, value=value))
-            continue
-
-        # Default common fields to XMP
-        if key.lower() in {k.lower() for k in XMP_DEFAULT_FIELDS}:
-            payload.fields.append(MetadataField(schema=MetadataSchema.XMP, key=key, value=value))
+        prefix, separator, remainder = key.partition(":")
+        if separator and prefix.lower() in schema_aliases:
+            schema, tag = schema_aliases[prefix.lower()], remainder
+        elif separator and prefix.lower() in ("dc", "photoshop", "iptc4xmpcore", "xmp-dc"):
+            schema = MetadataSchema.XMP
+            tag = "dc:" + remainder if prefix.lower() == "xmp-dc" else key
+        elif separator:
+            schema, tag = MetadataSchema.EXIFTOOL, key
         else:
-            # Unknown field → XMP custom
-            payload.fields.append(MetadataField(schema=MetadataSchema.XMP, key=key, value=value))
-
+            schema, tag = MetadataSchema.XMP, key
+        payload.fields.append(MetadataField(schema=schema, key=tag, value=value))
     return payload

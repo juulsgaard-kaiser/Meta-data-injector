@@ -2,7 +2,7 @@
 Apex Meta-Injector — Windows-optimized Thread Pool.
 
 Wraps concurrent.futures.ThreadPoolExecutor with:
-- Auto-tuned worker count for NVMe storage
+- Conservative automatic worker count
 - Progress reporting callbacks
 - Graceful shutdown with in-flight operation completion
 - Error collection and classification
@@ -11,21 +11,22 @@ Wraps concurrent.futures.ThreadPoolExecutor with:
 from __future__ import annotations
 
 import logging
-import os
+import threading
 import time
+from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
-from dataclasses import dataclass, field
-from enum import Enum
-from pathlib import Path
-from typing import Any, Callable, Optional
+from dataclasses import dataclass, replace
+from enum import StrEnum
+from typing import Any
 
 from apex_injector.config import get_config
 
 logger = logging.getLogger(__name__)
 
 
-class TaskStatus(str, Enum):
+class TaskStatus(StrEnum):
     """Status of a pool task."""
+
     QUEUED = "queued"
     RUNNING = "running"
     COMPLETED = "completed"
@@ -36,16 +37,18 @@ class TaskStatus(str, Enum):
 @dataclass
 class TaskResult:
     """Result of a single pool task."""
+
     task_id: str
     status: TaskStatus
     result: Any = None
-    error: Optional[str] = None
+    error: str | None = None
     duration_ms: float = 0.0
 
 
 @dataclass
 class PoolProgress:
     """Real-time progress of the thread pool."""
+
     total: int = 0
     queued: int = 0
     running: int = 0
@@ -59,7 +62,7 @@ class PoolProgress:
     def percent(self) -> float:
         if self.total == 0:
             return 0.0
-        return (self.completed + self.failed) / self.total * 100
+        return (self.completed + self.failed + self.cancelled) / self.total * 100
 
     def to_dict(self) -> dict:
         return {
@@ -79,26 +82,27 @@ class InjectionPool:
     """
     Windows-optimized thread pool for batch metadata injection.
 
-    Optimized for I/O-bound tasks on NVMe storage with configurable
+    Runs I/O-bound tasks with configurable
     worker counts and real-time progress reporting.
     """
 
     def __init__(
         self,
-        max_workers: Optional[int] = None,
-        on_progress: Optional[Callable[[PoolProgress], None]] = None,
-        on_task_complete: Optional[Callable[[TaskResult], None]] = None,
+        max_workers: int | None = None,
+        on_progress: Callable[[PoolProgress], None] | None = None,
+        on_task_complete: Callable[[TaskResult], None] | None = None,
     ):
         config = get_config()
         self._max_workers = max_workers or config.engine.get_worker_count()
         self._on_progress = on_progress
         self._on_task_complete = on_task_complete
-        self._executor: Optional[ThreadPoolExecutor] = None
+        self._executor: ThreadPoolExecutor | None = None
         self._futures: dict[Future, str] = {}
         self._progress = PoolProgress()
         self._results: list[TaskResult] = []
         self._start_time: float = 0.0
         self._cancelled = False
+        self._lock = threading.RLock()
 
         logger.info("Thread pool configured with %d workers", self._max_workers)
 
@@ -124,122 +128,90 @@ class InjectionPool:
         Each task is a tuple of (task_id, callable, args, kwargs).
         Returns list of TaskResults.
         """
-        self._start_time = time.perf_counter()
-        self._progress = PoolProgress(total=len(tasks))
-        self._results = []
-        self._cancelled = False
-
-        self._executor = ThreadPoolExecutor(
-            max_workers=self._max_workers,
-            thread_name_prefix="apex-inject",
-        )
-
+        with self._lock:
+            if self._executor is not None:
+                raise RuntimeError("This pool is already running")
+            self._start_time = time.perf_counter()
+            self._progress = PoolProgress(total=len(tasks), queued=len(tasks))
+            self._results = []
+            self._executor = ThreadPoolExecutor(max_workers=self._max_workers, thread_name_prefix="apex-inject")
         try:
             for task_id, fn, args, kwargs in tasks:
-                if self._cancelled:
-                    break
-
-                future = self._executor.submit(self._wrapped_call, task_id, fn, args, kwargs)
-                self._futures[future] = task_id
-                self._progress.queued += 1
-                self._emit_progress()
-
-            # Wait for completion
-            for future in as_completed(self._futures):
-                if self._cancelled:
-                    break
-
+                with self._lock:
+                    future = self._executor.submit(self._wrapped_call, task_id, fn, args, kwargs)
+                    self._futures[future] = task_id
+                    if self._cancelled:
+                        future.cancel()
+            for future in as_completed(list(self._futures)):
                 task_id = self._futures[future]
-                try:
-                    task_result = future.result()
+                if future.cancelled():
+                    task_result = TaskResult(task_id, TaskStatus.CANCELLED)
+                    with self._lock:
+                        self._progress.queued -= 1
+                else:
+                    try:
+                        task_result = future.result()
+                    except Exception as e:
+                        task_result = TaskResult(task_id, TaskStatus.FAILED, error=str(e))
+                with self._lock:
                     self._results.append(task_result)
-
-                    if task_result.status == TaskStatus.COMPLETED:
-                        self._progress.completed += 1
-                    else:
+                    if task_result.status == TaskStatus.CANCELLED:
+                        self._progress.cancelled += 1
+                    elif task_result.status == TaskStatus.FAILED:
                         self._progress.failed += 1
-
-                except Exception as e:
-                    result = TaskResult(
-                        task_id=task_id,
-                        status=TaskStatus.FAILED,
-                        error=str(e),
-                    )
-                    self._results.append(result)
-                    self._progress.failed += 1
-
-                self._progress.queued = max(0, self._progress.queued - 1)
-                self._emit_progress()
-
+                    else:
+                        self._progress.completed += 1
                 if self._on_task_complete:
-                    self._on_task_complete(self._results[-1])
-
+                    self._on_task_complete(task_result)
+                self._emit_progress()
         finally:
             self._executor.shutdown(wait=True)
-            self._executor = None
-            self._futures.clear()
-
-        return self._results
+            with self._lock:
+                self._executor = None
+                self._futures.clear()
+        return self.results
 
     def cancel(self):
-        """Cancel all pending tasks. In-flight tasks will complete."""
-        self._cancelled = True
-        if self._executor:
-            for future in list(self._futures.keys()):
-                if not future.done():
-                    future.cancel()
-                    self._progress.cancelled += 1
+        with self._lock:
+            self._cancelled = True
+            for future in self._futures:
+                future.cancel()
 
-    def _wrapped_call(
-        self,
-        task_id: str,
-        fn: Callable,
-        args: tuple,
-        kwargs: dict,
-    ) -> TaskResult:
-        """Wrap a callable with timing and error handling."""
+    def _wrapped_call(self, task_id, fn, args, kwargs):
         start = time.perf_counter()
-        self._progress.running += 1
+        with self._lock:
+            self._progress.queued -= 1
+            if self._cancelled:
+                return TaskResult(task_id, TaskStatus.CANCELLED)
+            self._progress.running += 1
         self._emit_progress()
-
         try:
             result = fn(*args, **kwargs)
-            duration = (time.perf_counter() - start) * 1000
-
+            status = getattr(result, "status", None)
+            failed = status is not None and getattr(status, "value", status) not in ("success", "complex_wrap_required")
             return TaskResult(
-                task_id=task_id,
-                status=TaskStatus.COMPLETED,
+                task_id,
+                TaskStatus.FAILED if failed else TaskStatus.COMPLETED,
                 result=result,
-                duration_ms=duration,
+                duration_ms=(time.perf_counter() - start) * 1000,
             )
         except Exception as e:
-            duration = (time.perf_counter() - start) * 1000
-            logger.error("Task %s failed: %s", task_id, e)
-
             return TaskResult(
-                task_id=task_id,
-                status=TaskStatus.FAILED,
-                error=str(e),
-                duration_ms=duration,
+                task_id, TaskStatus.FAILED, error=str(e), duration_ms=(time.perf_counter() - start) * 1000
             )
         finally:
-            self._progress.running = max(0, self._progress.running - 1)
+            with self._lock:
+                self._progress.running -= 1
 
     def _emit_progress(self):
         """Emit progress update."""
-        self._progress.elapsed_ms = (time.perf_counter() - self._start_time) * 1000
-
-        # ETA calculation
-        done = self._progress.completed + self._progress.failed
-        if done > 0 and self._progress.elapsed_ms > 0:
-            avg_per_task = self._progress.elapsed_ms / done
-            remaining = self._progress.total - done
-            self._progress.eta_ms = avg_per_task * remaining
-        else:
-            self._progress.eta_ms = 0
-
+        with self._lock:
+            self._progress.elapsed_ms = (time.perf_counter() - self._start_time) * 1000
+            done = self._progress.completed + self._progress.failed + self._progress.cancelled
+            self._progress.eta_ms = self._progress.elapsed_ms / done * (self._progress.total - done) if done else 0
+            snapshot = replace(self._progress)
         if self._on_progress:
             try:
-                self._on_progress(self._progress)
-            except Exception as e:
-                logger.debug("Progress callback error: %s", e)
+                self._on_progress(snapshot)
+            except Exception:
+                logger.exception("Progress callback failed")

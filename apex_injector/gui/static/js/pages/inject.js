@@ -1,127 +1,133 @@
-/** Inject Page — Single/Multi file metadata injection */
+/** Full-path selection, deep inspection, explicit edits, and risk preview. */
 Pages.inject = {
     selectedFiles: [],
-    analyzedFiles: [],
-
+    inventory: [],
     render(container) {
         container.innerHTML = `
-        <div class="page-header">
-            <h1 class="page-title">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M12 5v14M5 12h14"/></svg>
-                Inject Metadata
-            </h1>
-            <p class="page-subtitle">Add or modify metadata in media files without re-encoding</p>
-        </div>
-
-        <!-- File Selection -->
-        <div class="card mb-lg" id="inject-dropzone-card">
-            ${Dropzone.create('inject-dropzone', { text: 'Drop media files here or click to browse' })}
-        </div>
-
-        <!-- Selected Files -->
-        <div class="card mb-lg hidden" id="inject-files-card">
-            <div class="card-header">
-                <h3 class="card-title">Selected Files (<span id="inject-file-count">0</span>)</h3>
-                <button class="btn btn-sm btn-ghost" onclick="Pages.inject.clearFiles()">Clear All</button>
-            </div>
-            <div id="inject-file-table"></div>
-        </div>
-
-        <!-- Metadata Editor -->
-        <div class="card mb-lg hidden" id="inject-editor-card">
-            <div class="card-header">
-                <h3 class="card-title">Metadata</h3>
-            </div>
-            <div id="inject-editor">
-                ${MetadataEditor.create()}
-            </div>
-        </div>
-
-        <!-- Actions -->
-        <div class="hidden" id="inject-actions" style="display:none;justify-content:flex-end;gap:10px">
-            <button class="btn btn-secondary" onclick="MetadataEditor.clear()">Reset Fields</button>
-            <button class="btn btn-success btn-lg" onclick="Pages.inject.execute()" id="inject-btn">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18"><path d="M12 5v14M5 12h14"/></svg>
-                Inject Metadata
-            </button>
-        </div>
-
-        <!-- Results -->
-        <div class="hidden mt-lg" id="inject-results-card">
-            <div class="card">
-                <div class="card-header"><h3 class="card-title">Results</h3></div>
-                <div id="inject-results"></div>
-            </div>
-        </div>`;
-
-        Dropzone.setup('inject-dropzone', (files) => this.handleFiles(files));
+        <div class="page-header"><h1 class="page-title">Inspect & Edit Metadata</h1>
+        <p class="page-subtitle">Read detailed tags, review risks, and verify each write</p></div>
+        <div class="card mb-lg"><div class="card-header"><h3 class="card-title">Select files</h3>
+        <button class="btn btn-primary" id="native-browse">Browse files</button></div>
+        <label class="input-label" for="inject-paths">Full file paths — one per line</label>
+        <textarea class="input" id="inject-paths" rows="3" placeholder="C:\\Media\\clip.mov"></textarea>
+        <p class="text-xs text-tertiary">The desktop file picker supplies full paths. In a browser, paste full paths here.</p>
+        <button class="btn btn-secondary mt-md" id="inspect-files">Inspect first file</button></div>
+        <div class="card mb-lg hidden" id="inspection-card"><h3 class="card-title">Metadata inventory</h3>
+        <p id="inspection-notice" class="text-sm text-tertiary"></p>
+        <input class="input mt-md" id="inventory-search" placeholder="Filter tag names or values">
+        <div id="inventory-list" style="max-height:420px;overflow:auto;margin-top:12px"></div>
+        <details><summary>Native metadata</summary><pre id="native-metadata" style="white-space:pre-wrap"></pre></details></div>
+        <div class="card mb-lg"><h3 class="card-title">Descriptive fields</h3>
+        <p class="text-sm text-tertiary">Use XMP for MP4/MOV, ID3 for AIFF, and the matching tab for other formats. Only filled fields are changed.</p>
+        ${MetadataEditor.create()}</div>
+        <div class="card mb-lg"><h3 class="card-title">Advanced metadata</h3>
+        <p class="text-sm text-tertiary">Add schema/tag/value edits as JSON. ExifTool exposes additional writable tags; embedded or unknown tags may be read-only. Risk is reviewed before applying changes.</p>
+        <textarea class="input font-mono" id="advanced-metadata" rows="6" spellcheck="false" placeholder='{"exiftool":{"XMP-dc:Title":"New title"}}'></textarea></div>
+        <div id="risk-preview" class="card mb-lg hidden"></div>
+        <div style="display:flex;gap:12px;justify-content:flex-end"><button class="btn btn-secondary" id="preview-edit">Preview risks</button>
+        <button class="btn btn-success" id="apply-edit">Review & apply changes</button></div>
+        <div class="card mt-lg hidden" id="inject-results-card"><h3 class="card-title">Results</h3><div id="inject-results"></div></div>`;
+        MetadataEditor.switchTab('xmp');
+        document.getElementById('inject-paths').value = this.selectedFiles.join('\n');
+        document.getElementById('native-browse').onclick = () => this.browse();
+        document.getElementById('inspect-files').onclick = () => this.inspect();
+        document.getElementById('inventory-search').oninput = () => this.renderInventory();
+        document.getElementById('preview-edit').onclick = () => this.preview().catch(e => Toast.show(e.message, 'error'));
+        document.getElementById('apply-edit').onclick = () => this.execute();
     },
-
-    async handleFiles(files) {
-        this.selectedFiles = files;
-        document.getElementById('inject-dropzone-card').classList.add('hidden');
-        document.getElementById('inject-files-card').classList.remove('hidden');
-        document.getElementById('inject-editor-card').classList.remove('hidden');
-        const actionsEl = document.getElementById('inject-actions');
-        actionsEl.classList.remove('hidden');
-        actionsEl.style.display = 'flex';
-        document.getElementById('inject-file-count').textContent = files.length;
-
-        // Show file list
-        const fileData = files.map(f => ({ file: f.name, name: f.name, size: f.size, container: null, codec: '...' }));
-        document.getElementById('inject-file-table').innerHTML = FileTable.create(fileData);
-
-        Toast.show(`${files.length} file(s) selected`, 'info');
+    paths() {
+        this.selectedFiles = document.getElementById('inject-paths').value.split(/\r?\n/).map(p => p.trim()).filter(Boolean);
+        if (!this.selectedFiles.length) throw new Error('Select at least one file');
+        return [...new Set(this.selectedFiles)];
     },
-
-    clearFiles() {
-        this.selectedFiles = [];
-        this.analyzedFiles = [];
-        document.getElementById('inject-dropzone-card').classList.remove('hidden');
-        document.getElementById('inject-files-card').classList.add('hidden');
-        document.getElementById('inject-editor-card').classList.add('hidden');
-        document.getElementById('inject-actions').style.display = 'none';
-        document.getElementById('inject-results-card').classList.add('hidden');
-    },
-
-    async execute() {
-        const metadata = MetadataEditor.getValues();
-        if (Object.keys(metadata).length === 0) {
-            Toast.show('Please fill in at least one metadata field', 'warning');
+    async browse() {
+        if (!window.pywebview?.api?.select_files) {
+            Toast.show('The file picker is available in the desktop app. Paste full paths above when using a browser.', 'info');
             return;
         }
-
-        const filePaths = this.selectedFiles.map(f => f.name);
-        const btn = document.getElementById('inject-btn');
-        btn.disabled = true;
-        btn.innerHTML = '<span class="dot" style="animation:pulse-dot 1s infinite"></span> Injecting...';
-
         try {
-            const result = await App.api('/inject', {
-                method: 'POST',
-                body: { files: filePaths, metadata }
-            });
-
-            const resultsEl = document.getElementById('inject-results');
-            const resultsCard = document.getElementById('inject-results-card');
-            resultsCard.classList.remove('hidden');
-
-            let html = '';
-            for (const r of result.results) {
-                const icon = r.status === 'success' ? '✓' : '✗';
-                const cls = r.status === 'success' ? 'text-success' : 'text-error';
-                html += `<div class="activity-item"><span class="activity-dot ${r.status === 'success' ? 'success' : 'error'}"></span><span class="activity-text"><strong class="${cls}">${icon}</strong> ${r.file} — ${r.fields_written} fields written (${formatDuration(r.duration_ms)})</span></div>`;
-                App.addActivity({ type: r.status === 'success' ? 'success' : 'error', text: `Injected: ${r.file}`, time: new Date().toLocaleTimeString() });
+            const paths = await window.pywebview.api.select_files();
+            if (paths.length) {
+                this.selectedFiles = paths;
+                document.getElementById('inject-paths').value = paths.join('\n');
+                await this.inspect();
             }
-            resultsEl.innerHTML = html;
-
-            const succeeded = result.results.filter(r => r.status === 'success').length;
-            Toast.show(`Injection complete: ${succeeded}/${result.results.length} succeeded`, succeeded === result.results.length ? 'success' : 'warning');
-        } catch (e) {
-            Toast.show(`Injection failed: ${e.message}`, 'error');
-        } finally {
-            btn.disabled = false;
-            btn.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18"><path d="M12 5v14M5 12h14"/></svg> Inject Metadata';
+        } catch (e) { Toast.show(e.message, 'error'); }
+    },
+    metadata() {
+        const basic = MetadataEditor.getValues();
+        const text = document.getElementById('advanced-metadata').value.trim();
+        const advanced = text ? JSON.parse(text) : {};
+        if (!advanced || Array.isArray(advanced) || typeof advanced !== 'object') throw new Error('Advanced metadata must be a JSON object');
+        for (const [schema, fields] of Object.entries(advanced)) {
+            if (!fields || Array.isArray(fields) || typeof fields !== 'object') throw new Error(`Fields in ${schema} must be an object`);
+            basic[schema] = {...basic[schema], ...fields};
         }
+        return basic;
+    },
+    async inspect() {
+        try {
+            const result = await App.api('/inspect', {method:'POST', body:{file:this.paths()[0], deep:true}});
+            this.inventory = result.inventory || [];
+            const tab = {wav:'bext', bwf:'bext', aiff:'id3v2.4', mkv:'matroska_tags'}[result.container] || 'xmp';
+            MetadataEditor.switchTab(tab);
+            document.getElementById('inspection-card').classList.remove('hidden');
+            document.getElementById('inspection-notice').textContent = `${result.file} — ${this.inventory.length} tags. ${result.inspection_warning || result.error || 'Reading a tag does not guarantee it can be edited.'}`;
+            document.getElementById('native-metadata').textContent = JSON.stringify(result.metadata, null, 2);
+            this.renderInventory();
+        } catch (e) { Toast.show(e.message, 'error'); }
+    },
+    renderInventory() {
+        const filter = document.getElementById('inventory-search').value.toLowerCase();
+        const list = document.getElementById('inventory-list');
+        list.replaceChildren();
+        for (const row of this.inventory.filter(r => (r.tag + JSON.stringify(r.value)).toLowerCase().includes(filter))) {
+            const item = document.createElement('div');
+            item.className = 'settings-row';
+            const body = document.createElement('div'); body.style.minWidth = '0';
+            const title = document.createElement('strong'); title.textContent = row.tag; title.style.overflowWrap = 'anywhere';
+            const value = document.createElement('pre'); value.style.whiteSpace = 'pre-wrap'; value.style.overflowWrap = 'anywhere'; value.textContent = JSON.stringify(row.value, null, 2);
+            const risk = document.createElement('p'); risk.className = row.risk.level === 'low' ? 'text-sm' : 'text-sm text-warning';
+            risk.textContent = `${row.risk.level.toUpperCase()}: ${row.risk.reason}`;
+            body.append(title, value, risk); item.append(body);
+            if (row.risk.level !== 'read_only') {
+                const edit = document.createElement('button'); edit.className = 'btn btn-sm btn-secondary'; edit.textContent = 'Add to edits';
+                edit.onclick = () => {
+                    try {
+                        const input = document.getElementById('advanced-metadata');
+                        const data = input.value.trim() ? JSON.parse(input.value) : {};
+                        data.exiftool = {...data.exiftool, [row.edit_tag || row.tag]: row.value};
+                        input.value = JSON.stringify(data, null, 2);
+                        Toast.show('Added to advanced edits. Change the value and review the risks before applying.', 'info');
+                    } catch (e) { Toast.show(e.message, 'error'); }
+                };
+                item.append(edit);
+            }
+            list.append(item);
+        }
+    },
+    async preview() {
+        const body = {files:this.paths(), metadata:this.metadata()};
+        const preview = await App.api('/preview', {method:'POST', body});
+        const target = document.getElementById('risk-preview');
+        target.classList.remove('hidden');
+        target.innerHTML = '<h3 class="card-title">Edit risk preview</h3>' + preview.fields.map(r =>
+            `<p><strong>${escapeHtml(r.level.toUpperCase())} — ${escapeHtml(r.schema)}:${escapeHtml(r.tag)}</strong><br>${escapeHtml(r.reason)}</p>`).join('') +
+            preview.protection_warnings.map(w => `<p class="text-error">${escapeHtml(w)}</p>`).join('');
+        return {body, preview};
+    },
+    async execute() {
+        const button = document.getElementById('apply-edit'); button.disabled = true;
+        try {
+            const {body, preview} = await this.preview();
+            if (!await confirmEditRisk(preview)) return;
+            const response = await App.api('/inject', {method:'POST', body:{...body, acknowledge_risk:true}});
+            document.getElementById('inject-results-card').classList.remove('hidden');
+            document.getElementById('inject-results').innerHTML = response.results.map(r =>
+                `<p><strong>${escapeHtml(r.status)}</strong> — ${escapeHtml(r.file)}<br>${escapeHtml(r.message || `${r.fields_written} fields written`)}${r.backup_path ? `<br>Backup: ${escapeHtml(r.backup_path)}` : ''}</p>`).join('');
+            const failed = response.results.filter(r => r.status !== 'success').length;
+            Toast.show(`${response.results.length - failed} succeeded; ${failed} failed`, failed ? 'warning' : 'success');
+        } catch (e) { Toast.show(e.message, 'error'); }
+        finally { button.disabled = false; }
     }
 };

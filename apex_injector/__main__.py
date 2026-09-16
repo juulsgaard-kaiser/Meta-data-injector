@@ -7,7 +7,6 @@ Usage:
     python -m apex_injector --gui        # Explicit GUI mode
 """
 
-import sys
 import argparse
 
 
@@ -24,8 +23,9 @@ def main():
     # Parse only known args to avoid conflicts with subcommand parsers
     args, remaining = parser.parse_known_args()
 
-    if args.cli:
+    if args.cli or (remaining and not args.gui):
         from apex_injector.cli import cli_main
+
         cli_main(remaining)
     else:
         main_gui()
@@ -34,6 +34,7 @@ def main():
 def main_gui():
     """Launch the desktop GUI application."""
     from apex_injector.gui import launch_gui
+
     launch_gui()
 
 

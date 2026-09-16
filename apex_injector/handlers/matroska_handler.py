@@ -22,7 +22,6 @@ from apex_injector.handlers import (
     FileAnalysis,
     InjectionResult,
     InjectionStatus,
-    MetadataPayload,
     register_handler,
 )
 
@@ -131,7 +130,7 @@ class MatroskaHandler(ContainerHandler):
             except Exception as e:
                 logger.debug("mkvmerge identify failed: %s", e)
 
-        analysis.injectable = self._get_mkvpropedit() is not None
+        analysis.injectable = all((self._get_mkvpropedit(), get_config().tools.mkvextract, get_config().tools.ffprobe))
         analysis.complex_wrap_risk = "none"
         analysis.current_metadata = self.read_metadata(file_path)
 
@@ -163,113 +162,112 @@ class MatroskaHandler(ContainerHandler):
 
         return metadata
 
-    def inject(
-        self,
-        file_path: Path,
-        payload: MetadataPayload,
-        staging_path: Path,
-    ) -> InjectionResult:
-        """
-        Inject metadata into an MKV file using mkvpropedit.
+    def _read_tags(self, path):
+        from xml.etree import ElementTree as ET
 
-        mkvpropedit modifies the file in-place, so we operate on the
-        staging copy. It handles EBML element sizing automatically.
-        """
+        from apex_injector.handlers.xml_metadata import parse_xml
+
+        tool = get_config().tools.mkvextract
+        if not tool:
+            raise ValueError("mkvextract is required to preserve existing tags")
+        proc = self._run_tool([tool, str(path), "tags"])
+        if proc.returncode != 0:
+            raise ValueError(f"mkvextract failed: {proc.stderr}")
+        # mkvextract emits the standard external DTD declaration. It is not
+        # needed to interpret tags; remove only this exact known declaration.
+        xml = proc.stdout.replace('<!DOCTYPE Tags SYSTEM "matroskatags.dtd">', "")
+        return parse_xml(xml.encode()) if xml.strip() else ET.Element("Tags")
+
+    def inject(self, file_path, payload, staging_path):
         import shutil
-        import time
+        from xml.etree import ElementTree as ET
 
-        start = time.perf_counter()
         result = InjectionResult(file_path=file_path, status=InjectionStatus.FAILED)
-
-        mkvpropedit = self._get_mkvpropedit()
-        if not mkvpropedit:
-            result.message = "mkvpropedit not available. Install MKVToolNix."
-            return result
-
-        # Copy original to staging
-        shutil.copy2(str(file_path), str(staging_path))
-
-        fields_written = 0
-        fields_failed = 0
-
-        # Build mkvpropedit commands
-        # Split into info-level (title, date) and tag-level properties
-        info_edits = []
-        tag_edits = []
-
-        for field in payload.fields:
-            mapping = MATROSKA_TAG_MAP.get(field.key)
-            if mapping:
-                level, prop_name = mapping
-                if level == "info":
-                    info_edits.append((prop_name, str(field.value)))
-                else:
-                    tag_edits.append((prop_name, str(field.value)))
-            else:
-                # Try as a direct Matroska tag
-                tag_edits.append((field.key, str(field.value)))
-
+        tag_file = None
         try:
-            # Apply info-level edits (title, date, etc.)
+            if not payload.fields or any(f.schema not in self.supported_schemas for f in payload.fields):
+                raise ValueError("Use matroska_tags or vorbis_comments for Matroska")
+            tool = self._get_mkvpropedit()
+            if not tool:
+                raise ValueError("mkvpropedit is required")
+            root = self._read_tags(file_path)
+            global_tags = [
+                tag for tag in root.findall("Tag") if tag.find("Targets") is None or len(tag.find("Targets")) == 0
+            ]
+            if not global_tags:
+                tag = ET.SubElement(root, "Tag")
+                ET.SubElement(tag, "Targets")
+                global_tags = [tag]
+            info_edits = []
+            expected_info = {}
+            expected = {}
+            for field in payload.fields:
+                level, name = MATROSKA_TAG_MAP.get(field.key, ("tags", field.key.upper()))
+                if level == "info":
+                    expected_info[name] = str(field.value)
+                    info_edits.extend(["--set", f"{name}={field.value}"])
+                    continue
+                values = field.value if isinstance(field.value, list) else [field.value]
+                expected[name] = [str(v) for v in values]
+                for tag in global_tags:
+                    for node in list(tag):
+                        if node.tag == "Simple" and node.findtext("Name") == name:
+                            tag.remove(node)
+                for value in values:
+                    node = ET.SubElement(global_tags[0], "Simple")
+                    ET.SubElement(node, "Name").text = name
+                    ET.SubElement(node, "String").text = str(value)
+            shutil.copy2(file_path, staging_path)
+            cmd = [tool, str(staging_path)]
             if info_edits:
-                cmd = [mkvpropedit, str(staging_path), "--edit", "info"]
-                for prop_name, value in info_edits:
-                    cmd.extend(["--set", f"{prop_name}={value}"])
+                cmd += ["--edit", "info"] + info_edits
+            if expected:
+                tag_file = staging_path.with_suffix(".tags.xml")
+                tag_file.write_bytes(ET.tostring(root, encoding="utf-8", xml_declaration=True))
+                cmd += ["--tags", f"all:{tag_file}"]
+            proc = self._run_tool(cmd)
+            if proc.returncode != 0:
+                raise ValueError(f"mkvpropedit failed or warned: {proc.stderr or proc.stdout}")
+            if expected_info:
+                identify = self._get_mkvmerge()
+                if not identify:
+                    raise ValueError("mkvmerge is required to read back Matroska information fields")
+                info = self._run_tool([identify, "-J", str(staging_path)])
+                if info.returncode:
+                    raise ValueError("Matroska information readback failed")
+                properties = json.loads(info.stdout).get("container", {}).get("properties", {})
+                for name, value in expected_info.items():
+                    actual_value = properties.get("date_utc" if name == "date" else name)
+                    if name == "date":
+                        from datetime import datetime
 
-                proc = self._run_tool(cmd)
-                if proc.returncode == 0:
-                    fields_written += len(info_edits)
-                else:
-                    fields_failed += len(info_edits)
-                    logger.warning("mkvpropedit info edit failed: %s", proc.stderr)
-
-            # Apply tag-level edits using XML tags
-            if tag_edits:
-                tag_xml = self._build_matroska_tags_xml(tag_edits)
-                tag_file = staging_path.parent / f".{staging_path.stem}_tags.xml"
-
-                try:
-                    tag_file.write_text(tag_xml, encoding="utf-8")
-                    cmd = [mkvpropedit, str(staging_path), "--tags", f"global:{tag_file}"]
-                    proc = self._run_tool(cmd)
-
-                    if proc.returncode == 0:
-                        fields_written += len(tag_edits)
-                    else:
-                        fields_failed += len(tag_edits)
-                        logger.warning("mkvpropedit tag edit failed: %s", proc.stderr)
-                finally:
-                    tag_file.unlink(missing_ok=True)
-
-            result.fields_written = fields_written
-            result.fields_failed = fields_failed
-            result.status = (
-                InjectionStatus.SUCCESS if fields_failed == 0
-                else InjectionStatus.PARTIAL if fields_written > 0
-                else InjectionStatus.FAILED
-            )
-            result.duration_ms = (time.perf_counter() - start) * 1000
-
+                        if datetime.fromisoformat(str(actual_value).replace("Z", "+00:00")) != datetime.fromisoformat(
+                            value.replace("Z", "+00:00")
+                        ):
+                            raise ValueError("Matroska date readback failed")
+                    elif actual_value != value:
+                        raise ValueError(f"Matroska info readback failed: {name}")
+            if expected:
+                actual = self._read_tags(staging_path)
+                for name, values in expected.items():
+                    found = [
+                        node.findtext("String")
+                        for tag in actual.findall("Tag")
+                        if tag.find("Targets") is None or len(tag.find("Targets")) == 0
+                        for node in tag.findall("Simple")
+                        if node.findtext("Name") == name
+                    ]
+                    if found != values:
+                        raise ValueError(f"Matroska tag readback failed: {name}")
+            result.status = InjectionStatus.SUCCESS
+            result.fields_written = len(payload.fields)
         except Exception as e:
             result.message = str(e)
-            logger.error("MKV injection failed: %s", e)
-
+            result.fields_failed = len(payload.fields)
+        finally:
+            if tag_file:
+                tag_file.unlink(missing_ok=True)
         return result
-
-    def _build_matroska_tags_xml(self, tags: list[tuple[str, str]]) -> str:
-        """Build a Matroska tags XML file for mkvpropedit."""
-        lines = ['<?xml version="1.0" encoding="UTF-8"?>', "<!DOCTYPE Tags SYSTEM \"matroskatags.dtd\">", "<Tags>", "  <Tag>", "    <Targets/>"]
-
-        for name, value in tags:
-            lines.extend([
-                "    <Simple>",
-                f"      <Name>{name}</Name>",
-                f"      <String>{value}</String>",
-                "    </Simple>",
-            ])
-
-        lines.extend(["  </Tag>", "</Tags>"])
-        return "\n".join(lines)
 
 
 # Auto-register

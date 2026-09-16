@@ -8,6 +8,7 @@ const Modal = {
         overlay.classList.remove('hidden');
     },
     hide() {
+        if (this.onClose) { const callback = this.onClose; this.onClose = null; callback(); }
         document.getElementById('modal-overlay').classList.add('hidden');
     },
     showComplexWrap(filePath, info) {

@@ -1,9 +1,8 @@
 """
 Apex Meta-Injector — ExifTool Bridge Handler.
 
-Universal fallback handler using PyExifTool for XMP, IPTC, and EXIF
-metadata injection across any container format. Runs ExifTool in
-batch (stay-open) mode for high throughput.
+ExifTool-backed inspection and writes to selected containers.
+Uses a separate ExifTool process for each operation.
 """
 
 from __future__ import annotations
@@ -13,7 +12,7 @@ import logging
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 from apex_injector.codec_manifest import ContainerFormat, MetadataSchema
 from apex_injector.config import get_config
@@ -38,7 +37,7 @@ SCHEMA_PREFIX = {
 
 class ExifToolBridge(ContainerHandler):
     """
-    Universal metadata handler using ExifTool.
+    Additional metadata support using ExifTool.
 
     This is a fallback handler for containers where native parsing
     isn't implemented, or for writing schemas that require ExifTool's
@@ -49,15 +48,15 @@ class ExifToolBridge(ContainerHandler):
     """
 
     def __init__(self):
-        self._process: Optional[subprocess.Popen] = None
+        self._process: subprocess.Popen | None = None
 
     @property
     def supported_containers(self) -> list[ContainerFormat]:
-        return list(ContainerFormat)
+        return [ContainerFormat.MP4, ContainerFormat.MOV, ContainerFormat.WAV, ContainerFormat.AIFF]
 
     @property
     def supported_schemas(self) -> list[MetadataSchema]:
-        return [MetadataSchema.XMP, MetadataSchema.IPTC, MetadataSchema.EXIF, MetadataSchema.ID3V24]
+        return [MetadataSchema.XMP, MetadataSchema.IPTC, MetadataSchema.EXIF, MetadataSchema.EXIFTOOL]
 
     def _get_exiftool(self) -> str | None:
         config = get_config()
@@ -155,41 +154,38 @@ class ExifToolBridge(ContainerHandler):
             result.message = "ExifTool not available"
             return result
 
+        from apex_injector.codec_manifest import detect_container
+
+        if detect_container(file_path) not in self.supported_containers:
+            result.message = "ExifTool writing is not supported for this container"
+            return result
+
         # Copy to staging
         shutil.copy2(str(file_path), str(staging_path))
 
         try:
-            args = ["-overwrite_original"]
+            import tempfile
 
+            record = {"SourceFile": str(staging_path.resolve())}
             for field in payload.fields:
-                prefix = SCHEMA_PREFIX.get(field.schema, "")
-                key = field.key
+                tag = self._tag(field)
+                if tag in record:
+                    raise ValueError(f"Duplicate tag: {tag}")
+                record[tag] = field.value
+            with tempfile.TemporaryDirectory(prefix="apex-tags-") as directory:
+                updates = Path(directory) / "metadata.json"
+                updates.write_text(json.dumps([record], ensure_ascii=False), encoding="utf-8")
+                proc = self._run_exiftool(
+                    ["-overwrite_original", "-q", "-struct", "-n", f"-j={updates}", str(staging_path.resolve())]
+                )
 
-                # Build the ExifTool tag notation
-                if prefix and ":" not in key:
-                    tag = f"-{prefix}:{key}={field.value}"
-                elif ":" in key:
-                    tag = f"-{key}={field.value}"
-                else:
-                    tag = f"-{key}={field.value}"
-
-                # Handle list values
-                if isinstance(field.value, list):
-                    for item in field.value:
-                        args.append(f"-{prefix}:{key}={item}")
-                else:
-                    args.append(tag)
-
-            args.append(str(staging_path))
-
-            proc = self._run_exiftool(args)
-
-            if proc.returncode == 0:
+            if proc.returncode == 0 and not proc.stderr.strip():
+                self._verify_fields(staging_path, payload)
                 result.status = InjectionStatus.SUCCESS
                 result.fields_written = len(payload.fields)
             elif "Warning" in (proc.stderr or ""):
-                result.status = InjectionStatus.PARTIAL
-                result.fields_written = len(payload.fields)
+                result.status = InjectionStatus.FAILED
+                result.fields_failed = len(payload.fields)
                 result.message = proc.stderr.strip()
             else:
                 result.message = proc.stderr.strip() if proc.stderr else "Unknown error"
@@ -201,6 +197,60 @@ class ExifToolBridge(ContainerHandler):
             logger.error("ExifTool injection failed: %s", e)
 
         return result
+
+    @staticmethod
+    def _tag(field):
+        import re
+
+        key = field.key
+        if not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_:.-]*", key):
+            raise ValueError(f"Invalid metadata tag: {key}")
+        if field.schema == MetadataSchema.EXIFTOOL:
+            if ":" not in key:
+                raise ValueError("Advanced tags must include a group, e.g. XMP-dc:Title")
+            if key.split(":")[0].lower() in ("file", "system", "exiftool"):
+                raise ValueError("Filesystem/tool pseudo-tags are read-only")
+            return key
+        prefix = SCHEMA_PREFIX.get(field.schema, "")
+        if field.schema == MetadataSchema.XMP and ":" in key:
+            namespace, name = key.split(":", 1)
+            return f"{namespace if namespace.lower().startswith('xmp') else 'XMP-' + namespace}:{name}"
+        if ":" in key:
+            return key
+        return f"{prefix}:{key}"
+
+    def inspect_all(self, path):
+        """Deep read: duplicates, unknown tags and embedded-document metadata.
+
+        Group/document/instance qualifiers keep unrelated values distinguishable.
+        Returned tags are an inventory, not a promise that every tag is writable.
+        """
+        proc = self._run_exiftool(["-json", "-G1:3:4", "-a", "-u", "-struct", "-n", "-ee3", str(path)], timeout=300)
+        if proc.returncode:
+            raise ValueError(proc.stderr.strip() or "ExifTool inspection failed")
+        return {"tags": json.loads(proc.stdout), "warnings": proc.stderr.strip()}
+
+    def _verify_fields(self, path, payload):
+        for field in payload.fields:
+            tag = self._tag(field)
+            proc = self._run_exiftool(["-j", "-s", "-struct", "-n", f"-{tag}", str(path)])
+            if proc.returncode or proc.stderr.strip():
+                raise ValueError(f"Metadata readback failed: {tag}")
+            records = json.loads(proc.stdout)
+            values = [v for k, v in records[0].items() if k != "SourceFile"] if records else []
+
+            def normalize(value):
+                if isinstance(value, dict):
+                    return {k: normalize(v) for k, v in value.items()}
+                if isinstance(value, list):
+                    return [normalize(v) for v in value]
+                return str(value)
+
+            wanted = field.value if isinstance(field.value, list) else [field.value]
+            if not any(
+                normalize(value if isinstance(value, list) else [value]) == normalize(wanted) for value in values
+            ):
+                raise ValueError(f"Metadata was not written: {tag}")
 
     def read_batch(self, file_paths: list[Path]) -> dict[str, dict[str, dict[str, Any]]]:
         """

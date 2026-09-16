@@ -1,46 +1,49 @@
 """
 Apex Meta-Injector — Codec Library Manifest.
 
-Definitive mapping of each codec to its container format(s), manipulation
-library, supported metadata schemas, and injection strategy. This module
-is the single source of truth for the container router.
+Reference catalog of each codec to its container format(s), manipulation
+library, supported metadata schemas, and injection strategy. The catalog identifies
+codecs; executable capabilities come from the registered handlers.
 """
 
 from __future__ import annotations
 
-import json
 import logging
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import StrEnum
 from pathlib import Path
-from typing import Optional
 
 logger = logging.getLogger(__name__)
 
 
-class ManipulationStrategy(str, Enum):
+class ManipulationStrategy(StrEnum):
     """How metadata is injected into a given codec/container combination."""
-    ATOM_EDIT = "atom_edit"           # ISOBMFF atom-level manipulation (MP4/MOV)
-    KLV_HEADER = "klv_header"         # MXF KLV header partition edit
-    EBML_EDIT = "ebml_edit"           # Matroska EBML property edit
-    RIFF_CHUNK = "riff_chunk"         # RIFF/BWF chunk-level manipulation
-    IFF_CHUNK = "iff_chunk"           # IFF/AIFF chunk manipulation
-    EXIFTOOL = "exiftool"             # Fallback via ExifTool CLI
+
+    ATOM_EDIT = "atom_edit"  # ISOBMFF atom-level manipulation (MP4/MOV)
+    READ_ONLY = "read_only"
+    KLV_HEADER = "klv_header"  # MXF KLV header partition edit
+    EBML_EDIT = "ebml_edit"  # Matroska EBML property edit
+    RIFF_CHUNK = "riff_chunk"  # RIFF/BWF chunk-level manipulation
+    IFF_CHUNK = "iff_chunk"  # IFF/AIFF chunk manipulation
+    EXIFTOOL = "exiftool"  # Fallback via ExifTool CLI
 
 
-class ContainerFormat(str, Enum):
+class ContainerFormat(StrEnum):
     """Supported container formats."""
+
     MP4 = "mp4"
     MOV = "mov"
     MXF = "mxf"
     MKV = "mkv"
-    WAV = "wav"     # Includes BWF
+    WAV = "wav"  # Includes BWF
     BWF = "bwf"
     AIFF = "aiff"
 
 
-class MetadataSchema(str, Enum):
+class MetadataSchema(StrEnum):
     """Supported metadata schemas."""
+
+    EXIFTOOL = "exiftool"  # Explicit group-qualified tags handled by ExifTool
     XMP = "xmp"
     IPTC = "iptc"
     EXIF = "exif"
@@ -52,28 +55,31 @@ class MetadataSchema(str, Enum):
     MATROSKA_TAGS = "matroska_tags"
 
 
-class ManipulationLibrary(str, Enum):
+class ManipulationLibrary(StrEnum):
     """Backend library used for the actual manipulation."""
-    PYMP4 = "pymp4"                    # pymp4 + construct (ISOBMFF parsing)
-    BMX = "bmx"                        # bmxtranswrap CLI (MXF)
-    MKVPROPEDIT = "mkvpropedit"        # mkvpropedit CLI (MKV)
-    MUTAGEN = "mutagen"                # mutagen (AIFF, audio tags)
-    WAVE_BWF_RF64 = "wave_bwf_rf64"    # wave-bwf-rf64 (BWF/WAV)
-    STRUCT = "struct"                  # Python struct (low-level RIFF)
-    EXIFTOOL = "exiftool"              # ExifTool CLI (universal fallback)
+
+    PYMP4 = "pymp4"  # pymp4 + construct (ISOBMFF parsing)
+    BMX = "bmx"  # bmxtranswrap CLI (MXF)
+    MKVPROPEDIT = "mkvpropedit"  # mkvpropedit CLI (MKV)
+    MUTAGEN = "mutagen"  # mutagen (AIFF, audio tags)
+    WAVE_BWF_RF64 = "wave_bwf_rf64"  # wave-bwf-rf64 (BWF/WAV)
+    STRUCT = "struct"  # Python struct (low-level RIFF)
+    EXIFTOOL = "exiftool"  # ExifTool CLI (universal fallback)
 
 
-class ComplexWrapRisk(str, Enum):
+class ComplexWrapRisk(StrEnum):
     """Risk level for requiring container re-wrapping."""
-    NONE = "none"           # Pure header edit, always safe
-    LOW = "low"             # Header edit possible but offset recalculation may be needed
-    MEDIUM = "medium"       # May need atom relocation within container
-    HIGH = "high"           # Likely requires full container re-wrap (MXF partition reindex)
+
+    NONE = "none"  # No container re-wrap required
+    LOW = "low"  # Header edit possible but offset recalculation may be needed
+    MEDIUM = "medium"  # May need atom relocation within container
+    HIGH = "high"  # Likely requires full container re-wrap (MXF partition reindex)
 
 
 @dataclass
 class CodecContainerMapping:
     """A specific codec + container combination and how to handle it."""
+
     codec: str
     codec_fourcc: list[str]
     container: ContainerFormat
@@ -82,12 +88,13 @@ class CodecContainerMapping:
     supported_schemas: list[MetadataSchema]
     complex_wrap_risk: ComplexWrapRisk = ComplexWrapRisk.NONE
     notes: str = ""
-    requires_tool: Optional[str] = None  # External tool name from ToolPaths
+    requires_tool: str | None = None  # External tool name from ToolPaths
 
 
 @dataclass
 class CodecFamily:
     """A codec family with its supported container mappings."""
+
     name: str
     category: str  # "professional_mezzanine" or "consumer_web"
     description: str
@@ -109,22 +116,22 @@ CODEC_MANIFEST: list[CodecFamily] = [
                 codec="Apple ProRes",
                 codec_fourcc=["ap4h", "ap4x", "apcn", "apcs", "apco", "aprh"],
                 container=ContainerFormat.MOV,
-                library=ManipulationLibrary.PYMP4,
+                library=ManipulationLibrary.STRUCT,
                 strategy=ManipulationStrategy.ATOM_EDIT,
-                supported_schemas=[MetadataSchema.XMP, MetadataSchema.IPTC, MetadataSchema.EXIF],
+                supported_schemas=[MetadataSchema.XMP],
                 complex_wrap_risk=ComplexWrapRisk.LOW,
-                notes="MOV atom tree; udta/meta atoms. Offset recalc needed if atom sizes change.",
+                notes="Native XMP packet edits preserve sample offsets. Additional tags require ExifTool.",
             ),
             CodecContainerMapping(
                 codec="Apple ProRes",
                 codec_fourcc=["ap4h", "ap4x", "apcn", "apcs", "apco", "aprh"],
                 container=ContainerFormat.MXF,
-                library=ManipulationLibrary.BMX,
-                strategy=ManipulationStrategy.KLV_HEADER,
-                supported_schemas=[MetadataSchema.SMPTE_377, MetadataSchema.XMP],
+                library=ManipulationLibrary.EXIFTOOL,
+                strategy=ManipulationStrategy.READ_ONLY,
+                supported_schemas=[],
                 complex_wrap_risk=ComplexWrapRisk.HIGH,
-                notes="MXF header partition may need re-indexing. Flagged as Complex Wrap.",
-                requires_tool="bmxtranswrap",
+                notes="Read-only. MXF writing and re-wrapping are not implemented.",
+                requires_tool="exiftool",
             ),
         ],
     ),
@@ -137,21 +144,21 @@ CODEC_MANIFEST: list[CodecFamily] = [
                 codec="Avid DNxHR/DNxHD",
                 codec_fourcc=["AVdh", "AVdn"],
                 container=ContainerFormat.MOV,
-                library=ManipulationLibrary.PYMP4,
+                library=ManipulationLibrary.STRUCT,
                 strategy=ManipulationStrategy.ATOM_EDIT,
-                supported_schemas=[MetadataSchema.XMP, MetadataSchema.IPTC, MetadataSchema.EXIF],
+                supported_schemas=[MetadataSchema.XMP],
                 complex_wrap_risk=ComplexWrapRisk.LOW,
             ),
             CodecContainerMapping(
                 codec="Avid DNxHR/DNxHD",
                 codec_fourcc=["AVdh", "AVdn"],
                 container=ContainerFormat.MXF,
-                library=ManipulationLibrary.BMX,
-                strategy=ManipulationStrategy.KLV_HEADER,
-                supported_schemas=[MetadataSchema.SMPTE_377, MetadataSchema.XMP],
+                library=ManipulationLibrary.EXIFTOOL,
+                strategy=ManipulationStrategy.READ_ONLY,
+                supported_schemas=[],
                 complex_wrap_risk=ComplexWrapRisk.HIGH,
-                notes="OP-Atom common for Avid workflows. Complex Wrap likely.",
-                requires_tool="bmxtranswrap",
+                notes="Read-only, including OP-Atom. No conversion to OP-1a.",
+                requires_tool="exiftool",
             ),
         ],
     ),
@@ -164,19 +171,19 @@ CODEC_MANIFEST: list[CodecFamily] = [
                 codec="Sony XAVC",
                 codec_fourcc=["xvc1", "xvci"],
                 container=ContainerFormat.MXF,
-                library=ManipulationLibrary.BMX,
-                strategy=ManipulationStrategy.KLV_HEADER,
-                supported_schemas=[MetadataSchema.SMPTE_377, MetadataSchema.XMP],
+                library=ManipulationLibrary.EXIFTOOL,
+                strategy=ManipulationStrategy.READ_ONLY,
+                supported_schemas=[],
                 complex_wrap_risk=ComplexWrapRisk.HIGH,
-                requires_tool="bmxtranswrap",
+                requires_tool="exiftool",
             ),
             CodecContainerMapping(
                 codec="Sony XAVC",
                 codec_fourcc=["avc1"],
                 container=ContainerFormat.MP4,
-                library=ManipulationLibrary.PYMP4,
+                library=ManipulationLibrary.STRUCT,
                 strategy=ManipulationStrategy.ATOM_EDIT,
-                supported_schemas=[MetadataSchema.XMP, MetadataSchema.IPTC, MetadataSchema.EXIF],
+                supported_schemas=[MetadataSchema.XMP],
                 complex_wrap_risk=ComplexWrapRisk.LOW,
             ),
         ],
@@ -190,15 +197,14 @@ CODEC_MANIFEST: list[CodecFamily] = [
                 codec="AVC-Intra",
                 codec_fourcc=["ai55", "ai15", "ai12", "ai13"],
                 container=ContainerFormat.MXF,
-                library=ManipulationLibrary.BMX,
-                strategy=ManipulationStrategy.KLV_HEADER,
-                supported_schemas=[MetadataSchema.SMPTE_377, MetadataSchema.XMP],
+                library=ManipulationLibrary.EXIFTOOL,
+                strategy=ManipulationStrategy.READ_ONLY,
+                supported_schemas=[],
                 complex_wrap_risk=ComplexWrapRisk.HIGH,
-                requires_tool="bmxtranswrap",
+                requires_tool="exiftool",
             ),
         ],
     ),
-
     # ── Consumer / Web ──────────────────────────────────────────────
     CodecFamily(
         name="H.264/AVC",
@@ -209,18 +215,18 @@ CODEC_MANIFEST: list[CodecFamily] = [
                 codec="H.264/AVC",
                 codec_fourcc=["avc1", "avc3"],
                 container=ContainerFormat.MP4,
-                library=ManipulationLibrary.PYMP4,
+                library=ManipulationLibrary.STRUCT,
                 strategy=ManipulationStrategy.ATOM_EDIT,
-                supported_schemas=[MetadataSchema.XMP, MetadataSchema.IPTC, MetadataSchema.EXIF],
+                supported_schemas=[MetadataSchema.XMP],
                 complex_wrap_risk=ComplexWrapRisk.LOW,
             ),
             CodecContainerMapping(
                 codec="H.264/AVC",
                 codec_fourcc=["avc1", "avc3"],
                 container=ContainerFormat.MOV,
-                library=ManipulationLibrary.PYMP4,
+                library=ManipulationLibrary.STRUCT,
                 strategy=ManipulationStrategy.ATOM_EDIT,
-                supported_schemas=[MetadataSchema.XMP, MetadataSchema.IPTC, MetadataSchema.EXIF],
+                supported_schemas=[MetadataSchema.XMP],
                 complex_wrap_risk=ComplexWrapRisk.LOW,
             ),
             CodecContainerMapping(
@@ -244,18 +250,18 @@ CODEC_MANIFEST: list[CodecFamily] = [
                 codec="H.265/HEVC",
                 codec_fourcc=["hvc1", "hev1"],
                 container=ContainerFormat.MP4,
-                library=ManipulationLibrary.PYMP4,
+                library=ManipulationLibrary.STRUCT,
                 strategy=ManipulationStrategy.ATOM_EDIT,
-                supported_schemas=[MetadataSchema.XMP, MetadataSchema.IPTC, MetadataSchema.EXIF],
+                supported_schemas=[MetadataSchema.XMP],
                 complex_wrap_risk=ComplexWrapRisk.LOW,
             ),
             CodecContainerMapping(
                 codec="H.265/HEVC",
                 codec_fourcc=["hvc1", "hev1"],
                 container=ContainerFormat.MOV,
-                library=ManipulationLibrary.PYMP4,
+                library=ManipulationLibrary.STRUCT,
                 strategy=ManipulationStrategy.ATOM_EDIT,
-                supported_schemas=[MetadataSchema.XMP, MetadataSchema.IPTC, MetadataSchema.EXIF],
+                supported_schemas=[MetadataSchema.XMP],
                 complex_wrap_risk=ComplexWrapRisk.LOW,
             ),
             CodecContainerMapping(
@@ -279,9 +285,9 @@ CODEC_MANIFEST: list[CodecFamily] = [
                 codec="AV1",
                 codec_fourcc=["av01"],
                 container=ContainerFormat.MP4,
-                library=ManipulationLibrary.PYMP4,
+                library=ManipulationLibrary.STRUCT,
                 strategy=ManipulationStrategy.ATOM_EDIT,
-                supported_schemas=[MetadataSchema.XMP, MetadataSchema.IPTC],
+                supported_schemas=[MetadataSchema.XMP],
                 complex_wrap_risk=ComplexWrapRisk.LOW,
             ),
             CodecContainerMapping(
@@ -315,7 +321,7 @@ CODEC_MANIFEST: list[CodecFamily] = [
                 codec="VP9",
                 codec_fourcc=["vp09"],
                 container=ContainerFormat.MP4,
-                library=ManipulationLibrary.PYMP4,
+                library=ManipulationLibrary.STRUCT,
                 strategy=ManipulationStrategy.ATOM_EDIT,
                 supported_schemas=[MetadataSchema.XMP],
                 complex_wrap_risk=ComplexWrapRisk.LOW,
@@ -331,14 +337,13 @@ CODEC_MANIFEST: list[CodecFamily] = [
                 codec="MPEG-D USAC",
                 codec_fourcc=["mp4a"],
                 container=ContainerFormat.MP4,
-                library=ManipulationLibrary.PYMP4,
+                library=ManipulationLibrary.STRUCT,
                 strategy=ManipulationStrategy.ATOM_EDIT,
-                supported_schemas=[MetadataSchema.XMP, MetadataSchema.IPTC, MetadataSchema.ID3V24],
+                supported_schemas=[MetadataSchema.XMP],
                 complex_wrap_risk=ComplexWrapRisk.LOW,
             ),
         ],
     ),
-
     # ── Audio Containers ────────────────────────────────────────────
     CodecFamily(
         name="PCM/BWF (Broadcast Wave)",
@@ -349,24 +354,28 @@ CODEC_MANIFEST: list[CodecFamily] = [
                 codec="PCM",
                 codec_fourcc=["0x0001"],  # WAVE_FORMAT_PCM
                 container=ContainerFormat.WAV,
-                library=ManipulationLibrary.WAVE_BWF_RF64,
+                library=ManipulationLibrary.STRUCT,
                 strategy=ManipulationStrategy.RIFF_CHUNK,
                 supported_schemas=[
-                    MetadataSchema.BEXT, MetadataSchema.IXML,
-                    MetadataSchema.XMP, MetadataSchema.ID3V24,
+                    MetadataSchema.BEXT,
+                    MetadataSchema.IXML,
+                    MetadataSchema.XMP,
+                    MetadataSchema.ID3V24,
                 ],
                 complex_wrap_risk=ComplexWrapRisk.NONE,
-                notes="Direct chunk read/write. RF64 compatible for files > 4GB.",
+                notes="Streaming RIFF chunk read/write. RF64 writing is not supported.",
             ),
             CodecContainerMapping(
                 codec="PCM",
                 codec_fourcc=["0x0001"],
                 container=ContainerFormat.BWF,
-                library=ManipulationLibrary.WAVE_BWF_RF64,
+                library=ManipulationLibrary.STRUCT,
                 strategy=ManipulationStrategy.RIFF_CHUNK,
                 supported_schemas=[
-                    MetadataSchema.BEXT, MetadataSchema.IXML,
-                    MetadataSchema.XMP, MetadataSchema.ID3V24,
+                    MetadataSchema.BEXT,
+                    MetadataSchema.IXML,
+                    MetadataSchema.XMP,
+                    MetadataSchema.ID3V24,
                 ],
                 complex_wrap_risk=ComplexWrapRisk.NONE,
             ),
@@ -383,7 +392,7 @@ CODEC_MANIFEST: list[CodecFamily] = [
                 container=ContainerFormat.AIFF,
                 library=ManipulationLibrary.MUTAGEN,
                 strategy=ManipulationStrategy.IFF_CHUNK,
-                supported_schemas=[MetadataSchema.ID3V24, MetadataSchema.XMP],
+                supported_schemas=[MetadataSchema.ID3V24],
                 complex_wrap_risk=ComplexWrapRisk.NONE,
                 notes="Mutagen handles IFF chunk structure and ID3v2.4 injection.",
             ),
@@ -399,12 +408,12 @@ CODEC_MANIFEST: list[CodecFamily] = [
 # Magic bytes for container identification
 CONTAINER_MAGIC: dict[ContainerFormat, list[tuple[int, bytes]]] = {
     ContainerFormat.MP4: [
-        (4, b"ftyp"),       # ISO Base Media File Format
+        (4, b"ftyp"),  # ISO Base Media File Format
     ],
     ContainerFormat.MOV: [
-        (4, b"ftyp"),       # Also starts with ftyp; disambiguate via brand
-        (4, b"moov"),       # Legacy MOV
-        (4, b"mdat"),       # Legacy MOV
+        (4, b"ftyp"),  # Also starts with ftyp; disambiguate via brand
+        (4, b"moov"),  # Legacy MOV
+        (4, b"mdat"),  # Legacy MOV
     ],
     ContainerFormat.MXF: [
         (0, b"\x06\x0e\x2b\x34"),  # SMPTE UL prefix
@@ -413,13 +422,13 @@ CONTAINER_MAGIC: dict[ContainerFormat, list[tuple[int, bytes]]] = {
         (0, b"\x1a\x45\xdf\xa3"),  # EBML header
     ],
     ContainerFormat.WAV: [
-        (0, b"RIFF"),      # RIFF header; check for WAVE at offset 8
+        (0, b"RIFF"),  # RIFF header; check for WAVE at offset 8
     ],
     ContainerFormat.BWF: [
-        (0, b"RIFF"),      # Same as WAV; differentiated by bext chunk presence
+        (0, b"RIFF"),  # Same as WAV; differentiated by bext chunk presence
     ],
     ContainerFormat.AIFF: [
-        (0, b"FORM"),      # IFF FORM header; check for AIFF/AIFC at offset 8
+        (0, b"FORM"),  # IFF FORM header; check for AIFF/AIFC at offset 8
     ],
 }
 
@@ -446,7 +455,7 @@ MOV_BRANDS = {b"qt  ", b"MSNV"}
 MP4_BRANDS = {b"isom", b"iso2", b"iso5", b"iso6", b"mp41", b"mp42", b"M4V ", b"M4A ", b"dash", b"avc1"}
 
 
-def detect_container(file_path: Path) -> Optional[ContainerFormat]:
+def detect_container(file_path: Path) -> ContainerFormat | None:
     """
     Detect container format using magic bytes and file extension.
 
@@ -459,7 +468,7 @@ def detect_container(file_path: Path) -> Optional[ContainerFormat]:
     try:
         with open(file_path, "rb") as f:
             header = f.read(16)
-    except (OSError, IOError) as e:
+    except OSError as e:
         logger.warning("Cannot read header of %s: %s", file_path, e)
         return ext_format
 
@@ -500,8 +509,8 @@ def detect_container(file_path: Path) -> Optional[ContainerFormat]:
 
 def find_mapping(
     container: ContainerFormat,
-    codec_fourcc: Optional[str] = None,
-) -> Optional[CodecContainerMapping]:
+    codec_fourcc: str | None = None,
+) -> CodecContainerMapping | None:
     """
     Find the best codec-container mapping for a detected file.
 
@@ -531,6 +540,10 @@ def find_all_mappings(container: ContainerFormat) -> list[CodecContainerMapping]
 
 def get_manifest_summary() -> list[dict]:
     """Return a JSON-serializable summary of the entire codec manifest."""
+    from apex_injector.engine import InjectionEngine
+    from apex_injector.handlers import get_handler
+
+    InjectionEngine()  # Register all handlers before reporting current capabilities.
     summary = []
     for family in CODEC_MANIFEST:
         entry = {
@@ -540,15 +553,23 @@ def get_manifest_summary() -> list[dict]:
             "mappings": [],
         }
         for m in family.mappings:
-            entry["mappings"].append({
-                "codec": m.codec,
-                "container": m.container.value,
-                "library": m.library.value,
-                "strategy": m.strategy.value,
-                "schemas": [s.value for s in m.supported_schemas],
-                "complex_wrap_risk": m.complex_wrap_risk.value,
-                "requires_tool": m.requires_tool,
-                "notes": m.notes,
-            })
+            handler = get_handler(m.container)
+            schemas = handler.supported_schemas if handler else []
+            entry["mappings"].append(
+                {
+                    "codec": m.codec,
+                    "container": m.container.value,
+                    "library": (
+                        "struct" if m.container in (ContainerFormat.MP4, ContainerFormat.MOV) else m.library.value
+                    ),
+                    "strategy": m.strategy.value,
+                    "schemas": [s.value for s in schemas],
+                    "writable": bool(schemas),
+                    "validation": "Container-based support; individual codec variants require validation",
+                    "complex_wrap_risk": m.complex_wrap_risk.value,
+                    "requires_tool": m.requires_tool,
+                    "notes": m.notes,
+                }
+            )
         summary.append(entry)
     return summary

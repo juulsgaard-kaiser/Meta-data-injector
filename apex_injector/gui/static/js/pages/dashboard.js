@@ -93,8 +93,8 @@ Pages.dashboard = {
         return App.state.activityLog.slice(0, 10).map(a => `
             <div class="activity-item">
                 <span class="activity-dot ${a.type}"></span>
-                <span class="activity-text">${a.text}</span>
-                <span class="activity-time">${a.time}</span>
+                <span class="activity-text">${escapeHtml(a.text)}</span>
+                <span class="activity-time">${escapeHtml(a.time)}</span>
             </div>`).join('');
     },
 
@@ -111,7 +111,7 @@ Pages.dashboard = {
                 const icon = info.available
                     ? '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>'
                     : '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>';
-                html += `<div class="tool-card"><div class="tool-status-icon ${iconClass}">${icon}</div><div class="tool-info"><div class="tool-name">${name}</div><div class="tool-version">${info.version || (info.available ? 'Found' : 'Not installed')}</div></div></div>`;
+                html += `<div class="tool-card"><div class="tool-status-icon ${iconClass}">${icon}</div><div class="tool-info"><div class="tool-name">${name}</div><div class="tool-version">${escapeHtml(info.version || (info.available ? 'Found' : 'Not installed'))}</div></div></div>`;
             }
             el.innerHTML = html;
         } catch (e) {
@@ -119,19 +119,17 @@ Pages.dashboard = {
         }
     },
 
-    loadManifest() {
-        const input = document.createElement('input');
-        input.type = 'file';
-        input.accept = '.json,.csv';
-        input.onchange = (e) => {
-            const file = e.target.files[0];
-            if (file) {
+    async loadManifest() {
+        if (!window.pywebview?.api?.select_files) {
+            location.hash = 'batch';
+            return;
+        }
+        try {
+            const paths = await window.pywebview.api.select_files();
+            if (paths.length) {
+                App.state.pendingManifest = paths[0];
                 location.hash = 'batch';
-                // Store manifest path for batch page
-                App.state.pendingManifest = file.name;
-                Toast.show(`Manifest loaded: ${file.name}`, 'info');
             }
-        };
-        input.click();
+        } catch (e) { Toast.show(e.message, 'error'); }
     }
 };

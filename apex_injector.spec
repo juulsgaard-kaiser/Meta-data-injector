@@ -11,10 +11,7 @@ Usage:
 """
 
 import os
-import sys
 from pathlib import Path
-
-block_cipher = None
 
 # Project root
 ROOT = Path(SPECPATH)
@@ -29,9 +26,6 @@ if STATIC.exists():
             src = os.path.join(root, f)
             dst = os.path.relpath(root, str(SRC))
             datas.append((src, os.path.join("apex_injector", dst)))
-
-# Include setup_tools.py at root level
-datas.append((str(ROOT / "setup_tools.py"), "."))
 
 a = Analysis(
     [str(SRC / "__main__.py")],
@@ -66,7 +60,6 @@ a = Analysis(
         "webview.platforms",
         "webview.platforms.edgechromium",
         # Media handling
-        "construct",
         "mutagen",
         "mutagen.aiff",
         "mutagen.id3",
@@ -89,7 +82,12 @@ a = Analysis(
         "apex_injector.handlers.bwf_handler",
         "apex_injector.handlers.aiff_handler",
         "apex_injector.handlers.exiftool_bridge",
-        "setup_tools",
+        "apex_injector.tool_status",
+        "apex_injector.risk",
+        "apex_injector.verification",
+        "apex_injector.handlers.xml_metadata",
+        "apex_injector.handlers.id3_metadata",
+        "mutagen.wave",
     ],
     hookspath=[],
     hooksconfig={},
@@ -99,13 +97,10 @@ a = Analysis(
         "unittest",
         "test",
     ],
-    win_no_prefer_redirects=False,
-    win_private_assemblies=False,
-    cipher=block_cipher,
     noarchive=False,
 )
 
-pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
+pyz = PYZ(a.pure)
 
 exe = EXE(
     pyz,
@@ -127,10 +122,15 @@ exe = EXE(
     version=None,
 )
 
+cli_exe = EXE(
+    pyz, a.scripts, [], exclude_binaries=True,
+    name="ApexMetaInjectorCLI", debug=False, strip=False, upx=True, console=True,
+)
+
 coll = COLLECT(
     exe,
+    cli_exe,
     a.binaries,
-    a.zipfiles,
     a.datas,
     strip=False,
     upx=True,

@@ -26,6 +26,7 @@ def _find_free_port() -> int:
 def _start_server(host: str, port: int):
     """Start the FastAPI server in a background thread."""
     import uvicorn
+
     from apex_injector.gui.server import create_app
 
     app = create_app()
@@ -83,11 +84,19 @@ def launch_gui():
             break
         except Exception:
             time.sleep(0.1)
+    else:
+        raise RuntimeError("The local GUI server did not start; check the logs")
+
+    class DesktopAPI:
+        def select_files(self):
+            selected = webview.windows[0].create_file_dialog(webview.OPEN_DIALOG, allow_multiple=True)
+            return [str(Path(path).resolve()) for path in (selected or [])]
 
     # Create native window
-    window = webview.create_window(
+    webview.create_window(
         title=f"{__app_name__} v{__version__}",
         url=url,
+        js_api=DesktopAPI(),
         width=1440,
         height=900,
         min_size=(1024, 600),

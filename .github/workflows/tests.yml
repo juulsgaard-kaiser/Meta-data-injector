@@ -1,0 +1,75 @@
+name: Tests and packaging
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install media tools (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg libimage-exiftool-perl mkvtoolnix
+      - name: Install media tools (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          choco install ffmpeg exiftool mkvtoolnix -y --no-progress
+          if ($LASTEXITCODE -notin @(0, 3010)) { exit $LASTEXITCODE }
+          'C:\Program Files\MKVToolNix' | Out-File -FilePath $env:GITHUB_PATH -Append
+      - run: python -m pip install ".[dev,build,ui-test]"
+      - name: Require integration tools
+        run: python -c "import shutil; names=['ffmpeg','ffprobe','exiftool','mkvpropedit','mkvextract','mkvmerge']; assert all(shutil.which(n) for n in names), {n:shutil.which(n) for n in names}"
+      - run: ruff check .
+      - run: ruff format --check .
+      - name: Install browser (Linux)
+        if: runner.os == 'Linux'
+        run: python -m playwright install --with-deps chromium
+      - name: Test (Linux, including browser)
+        if: runner.os == 'Linux'
+        env:
+          APEX_UI_TEST: '1'
+        run: python -m pytest -ra
+      - name: Test (Windows, native I/O)
+        if: runner.os == 'Windows'
+        run: python -m pytest -ra
+      - name: Build wheel
+        run: python -m build
+      - name: Test installed wheel outside source tree
+        shell: bash
+        run: |
+          python -m pip install --force-reinstall --no-deps dist/*.whl
+          cd "$RUNNER_TEMP"
+          python -m apex_injector --version
+          python -c "from fastapi.testclient import TestClient; from apex_injector.gui.server import create_app; c=TestClient(create_app()); assert c.get('/').status_code==200; assert c.get('/api/status').status_code==200"
+      - name: Build Windows executables
+        if: runner.os == 'Windows'
+        run: pyinstaller apex_injector.spec --noconfirm
+      - name: Smoke-test frozen CLI
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          & .\dist\ApexMetaInjector\ApexMetaInjectorCLI.exe --version
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          ffmpeg -v error -y -f lavfi -i color=c=blue:s=32x32:d=0.2 -c:v mpeg4 "$env:RUNNER_TEMP\sample.mp4"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & .\dist\ApexMetaInjector\ApexMetaInjectorCLI.exe inject "$env:RUNNER_TEMP\sample.mp4" --title "Frozen build"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & .\dist\ApexMetaInjector\ApexMetaInjectorCLI.exe verify "$env:RUNNER_TEMP\sample.mp4" --deep
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - uses: actions/upload-artifact@v4
+        if: runner.os == 'Windows'
+        with:
+          name: windows-alpha-build
+          path: dist/ApexMetaInjector/

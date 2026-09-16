@@ -79,7 +79,7 @@ Pages.scan = {
             document.getElementById('scan-stats').innerHTML = `
                 <div class="stat-card"><div class="stat-icon blue"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V9z"/></svg></div><div class="stat-info"><div class="stat-value">${result.total}</div><div class="stat-label">Total Files</div></div></div>
                 <div class="stat-card"><div class="stat-icon green"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg></div><div class="stat-info"><div class="stat-value">${injectable}</div><div class="stat-label">Injectable</div></div></div>
-                <div class="stat-card"><div class="stat-icon yellow"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg></div><div class="stat-info"><div class="stat-value">${complexWrap}</div><div class="stat-label">Complex Wrap</div></div></div>
+                <div class="stat-card"><div class="stat-icon yellow"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg></div><div class="stat-info"><div class="stat-value">${complexWrap}</div><div class="stat-label">Needs Review</div></div></div>
                 <div class="stat-card"><div class="stat-icon purple"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 16V8a2 2 0 00-1-1.73l-7-4a2 2 0 00-2 0l-7 4A2 2 0 002 8v8a2 2 0 001 1.73l7 4a2 2 0 002 0l7-4A2 2 0 0021 16z"/></svg></div><div class="stat-info"><div class="stat-value">${formatBytes(totalSize)}</div><div class="stat-label">Total Size</div></div></div>`;
 
             // Table
@@ -99,7 +99,8 @@ Pages.scan = {
         if (!this.scanResults) return;
         let csv = 'File,Container,Codec,Size,Injectable,Risk,Error\n';
         this.scanResults.forEach(f => {
-            csv += `"${f.file}","${f.container || ''}","${f.codec || ''}",${f.size},"${f.injectable}","${f.complex_wrap_risk}","${f.error || ''}"\n`;
+            csv += [f.file, f.container || '', f.codec || '', f.size, f.injectable, f.complex_wrap_risk, f.error || '']
+                .map(value => '"' + String(value).replaceAll('"', '""') + '"').join(',') + '\n';
         });
         const blob = new Blob([csv], { type: 'text/csv' });
         const url = URL.createObjectURL(blob);
